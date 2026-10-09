@@ -25,7 +25,7 @@ module test_integral_multipole
    use tblite_cutoff, only : get_lattice_points
    use tblite_integral_native_integrals, only : dipole_cgto, dipole_grad_cgto, &
       & get_dipole_integrals, multipole_cgto, multipole_grad_cgto, &
-      & get_multipole_integrals, msao
+      & multipole_hess_cgto, get_multipole_integrals, msao
    implicit none
    private
 
@@ -49,6 +49,9 @@ subroutine collect_integral_multipole(testsuite)
       new_unittest("dipole-trans-pp", test_dipole_pp), &
       new_unittest("dipole-trans-dd", test_dipole_dd), &
       new_unittest("dipole-grad-ss", test_dipole_grad_ss), &
+      new_unittest("multipole-hess-ss", test_multipole_hess_ss), &
+      new_unittest("multipole-hess-pd", test_multipole_hess_pd), &
+      new_unittest("multipole-hess-dd", test_multipole_hess_dd), &
       new_unittest("overlap-dipole-diat-alh3", test_overlap_dipole_diat_alh3), &
       new_unittest("overlap-multipole-diat-alh3", test_overlap_multipole_diat_alh3) &
       ]
@@ -262,6 +265,141 @@ subroutine test_dipole_grad_ss(error)
    if (allocated(error)) return
 
 end subroutine test_dipole_grad_ss
+
+
+subroutine test_multipole_hess_gen(error, ni, li, nj, lj)
+   !***********************************
+   !* Compare the multipole integral Hessians of a shell pair against finite
+   !* differences of the analytic gradients, and the values and gradients
+   !* against multipole_grad_cgto.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> Principal and angular quantum number of the shell on center i
+   integer, intent(in) :: ni, li
+   !> Principal and angular quantum number of the shell on center j
+   integer, intent(in) :: nj, lj
+
+   integer, parameter :: ng = 6
+   integer :: stat, i, mi, mj
+   type(cgto_type) :: cgtoi, cgtoj
+   real(wp) :: vec(3), r2
+   real(wp), allocatable :: s(:, :), dp(:, :, :), qp(:, :, :), ds(:, :, :)
+   real(wp), allocatable :: ddj(:, :, :, :), dqj(:, :, :, :)
+   real(wp), allocatable :: ddi(:, :, :, :), dqi(:, :, :, :)
+   real(wp), allocatable :: d2s(:, :, :, :), d2dj(:, :, :, :, :), d2qj(:, :, :, :, :)
+   real(wp), allocatable :: d2di(:, :, :, :, :), d2qi(:, :, :, :, :)
+   real(wp), allocatable :: s0(:, :), dp0(:, :, :), qp0(:, :, :), ds0(:, :, :, :)
+   real(wp), allocatable :: ddj0(:, :, :, :, :), dqj0(:, :, :, :, :)
+   real(wp), allocatable :: ddi0(:, :, :, :, :), dqi0(:, :, :, :, :)
+   real(wp), allocatable :: n2s(:, :, :, :), n2dj(:, :, :, :, :), n2qj(:, :, :, :, :)
+   real(wp), allocatable :: n2di(:, :, :, :, :), n2qi(:, :, :, :, :)
+   real(wp), parameter :: step = 1.0e-5_wp
+
+   call slater_to_gauss(ng, ni, li, 1.0_wp, cgtoi, .true., stat)
+   call slater_to_gauss(ng, nj, lj, 1.2_wp, cgtoj, .true., stat)
+
+   mi = msao(li)
+   mj = msao(lj)
+   allocate(s(mj, mi), dp(3, mj, mi), qp(6, mj, mi), ds(3, mj, mi), &
+      & ddj(3, 3, mj, mi), dqj(3, 6, mj, mi), ddi(3, 3, mj, mi), dqi(3, 6, mj, mi), &
+      & d2s(3, 3, mj, mi), d2dj(3, 3, 3, mj, mi), d2qj(3, 3, 6, mj, mi), &
+      & d2di(3, 3, 3, mj, mi), d2qi(3, 3, 6, mj, mi), &
+      & n2s(3, 3, mj, mi), n2dj(3, 3, 3, mj, mi), n2qj(3, 3, 6, mj, mi), &
+      & n2di(3, 3, 3, mj, mi), n2qi(3, 3, 6, mj, mi))
+   ! reference values and gradients at the central (0) and displaced (1, 2) points
+   allocate(s0(mj, mi), dp0(3, mj, mi), qp0(6, mj, mi), ds0(3, mj, mi, 0:2), &
+      & ddj0(3, 3, mj, mi, 0:2), dqj0(3, 6, mj, mi, 0:2), &
+      & ddi0(3, 3, mj, mi, 0:2), dqi0(3, 6, mj, mi, 0:2))
+
+   vec(:) = [0.3_wp, -0.5_wp, 0.7_wp]
+   r2 = sum(vec**2)
+
+   call multipole_hess_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, s, dp, qp, ds, &
+      & ddj, dqj, ddi, dqi, d2s, d2dj, d2qj, d2di, d2qi)
+   call multipole_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, s0, dp0, qp0, &
+      & ds0(:, :, :, 0), ddj0(:, :, :, :, 0), dqj0(:, :, :, :, 0), &
+      & ddi0(:, :, :, :, 0), dqi0(:, :, :, :, 0))
+
+   if (any(abs(s - s0) > thr) .or. any(abs(dp - dp0) > thr) &
+      & .or. any(abs(qp - qp0) > thr)) then
+      call test_failed(error, "Multipole integrals from Hessian kernel do not match")
+      return
+   end if
+   if (any(abs(ds - ds0(:, :, :, 0)) > thr) &
+      & .or. any(abs(ddj - ddj0(:, :, :, :, 0)) > thr) &
+      & .or. any(abs(dqj - dqj0(:, :, :, :, 0)) > thr) &
+      & .or. any(abs(ddi - ddi0(:, :, :, :, 0)) > thr) &
+      & .or. any(abs(dqi - dqi0(:, :, :, :, 0)) > thr)) then
+      call test_failed(error, "Multipole gradients from Hessian kernel do not match")
+      return
+   end if
+
+   do i = 1, 3
+      vec(i) = vec(i) + step
+      r2 = sum(vec**2)
+      call multipole_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, s0, dp0, qp0, &
+         & ds0(:, :, :, 1), ddj0(:, :, :, :, 1), dqj0(:, :, :, :, 1), &
+         & ddi0(:, :, :, :, 1), dqi0(:, :, :, :, 1))
+      vec(i) = vec(i) - 2*step
+      r2 = sum(vec**2)
+      call multipole_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, s0, dp0, qp0, &
+         & ds0(:, :, :, 2), ddj0(:, :, :, :, 2), dqj0(:, :, :, :, 2), &
+         & ddi0(:, :, :, :, 2), dqi0(:, :, :, :, 2))
+      vec(i) = vec(i) + step
+      n2s(i, :, :, :) = 0.5_wp * (ds0(:, :, :, 1) - ds0(:, :, :, 2)) / step
+      n2dj(i, :, :, :, :) = 0.5_wp * (ddj0(:, :, :, :, 1) - ddj0(:, :, :, :, 2)) / step
+      n2qj(i, :, :, :, :) = 0.5_wp * (dqj0(:, :, :, :, 1) - dqj0(:, :, :, :, 2)) / step
+      n2di(i, :, :, :, :) = 0.5_wp * (ddi0(:, :, :, :, 1) - ddi0(:, :, :, :, 2)) / step
+      n2qi(i, :, :, :, :) = 0.5_wp * (dqi0(:, :, :, :, 1) - dqi0(:, :, :, :, 2)) / step
+   end do
+
+   if (any(abs(d2s - n2s) > thr1*10)) then
+      call test_failed(error, "Overlap Hessian does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(d2s - n2s))
+      return
+   end if
+   if (any(abs(d2dj - n2dj) > thr1*10) .or. any(abs(d2di - n2di) > thr1*10)) then
+      call test_failed(error, "Dipole Hessian does not match finite differences")
+      print "(a, 2es12.4)", "max. deviation:", maxval(abs(d2dj - n2dj)), &
+         & maxval(abs(d2di - n2di))
+      return
+   end if
+   if (any(abs(d2qj - n2qj) > thr1*10) .or. any(abs(d2qi - n2qi) > thr1*10)) then
+      call test_failed(error, "Quadrupole Hessian does not match finite differences")
+      print "(a, 2es12.4)", "max. deviation:", maxval(abs(d2qj - n2qj)), &
+         & maxval(abs(d2qi - n2qi))
+      return
+   end if
+
+end subroutine test_multipole_hess_gen
+
+subroutine test_multipole_hess_ss(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_multipole_hess_gen(error, 2, 0, 1, 0)
+
+end subroutine test_multipole_hess_ss
+
+subroutine test_multipole_hess_pd(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_multipole_hess_gen(error, 2, 1, 3, 2)
+
+end subroutine test_multipole_hess_pd
+
+subroutine test_multipole_hess_dd(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_multipole_hess_gen(error, 3, 2, 4, 2)
+
+end subroutine test_multipole_hess_dd
 
 subroutine test_overlap_dipole_mol(error, mol, diat_scale, ref)
 

@@ -32,6 +32,7 @@ module tblite_integral_native_integrals
    public :: overlap_cgto, overlap_grad_cgto, get_overlap
    public :: dipole_cgto, dipole_grad_cgto, get_dipole_integrals
    public :: multipole_cgto, multipole_grad_cgto, get_multipole_integrals
+   public :: overlap_hess_cgto, multipole_hess_cgto
    public :: maxl, msao, smap, sdim
 
    interface get_overlap
@@ -92,8 +93,9 @@ elemental function overlap_1d(moment, alpha) result(overlap)
    integer, intent(in) :: moment
    real(wp), intent(in) :: alpha
    real(wp) :: overlap
-   real(wp), parameter :: dfactorial(0:7) = & ! see OEIS A001147
-      & [1.0_wp,1.0_wp,3.0_wp,15.0_wp,105.0_wp,945.0_wp,10395.0_wp,135135.0_wp]
+   real(wp), parameter :: dfactorial(0:8) = & ! see OEIS A001147
+      & [1.0_wp,1.0_wp,3.0_wp,15.0_wp,105.0_wp,945.0_wp,10395.0_wp,135135.0_wp, &
+      & 2027025.0_wp]
 
    if (modulo(moment, 2) == 0) then
       overlap = (0.5_wp/alpha)**(moment/2) * dfactorial(moment/2)
@@ -1589,5 +1591,433 @@ subroutine get_multipole_integrals_diat_lat(mol, trans, cutoff, bas, &
    end do
 
 end subroutine get_multipole_integrals_diat_lat
+
+pure subroutine add_shifted_monomial(ae, l, scale, cfs)
+   !***********************************
+   !* Add the coefficients of scale*(x + ae)**l to the polynomial cfs,
+   !* for any l within the bounds of cfs. Negative l is a no-op.
+   !***********************************
+   real(wp), intent(in) :: ae
+   integer, intent(in) :: l
+   real(wp), intent(in) :: scale
+   real(wp), intent(inout) :: cfs(0:)
+
+   integer :: m
+   real(wp) :: bin, pw
+
+   if (l < 0) return
+   bin = 1.0_wp
+   pw = scale
+   do m = l, 0, -1
+      cfs(m) = cfs(m) + bin * pw
+      bin = bin * real(m, wp) / real(l - m + 1, wp)
+      pw = pw * ae
+   end do
+end subroutine add_shifted_monomial
+
+pure subroutine multipole_hess_1d(rpj, rpi, ai, lj, li, s1d, v1d, g1d, h1d)
+   !***********************************
+   !* One-dimensional factor of a primitive pair with its first and second
+   !* derivative w.r.t. center i. The three entries are the moment orders
+   !* 0, 1 and 2 of the operator about center j.
+   !***********************************
+   real(wp), intent(in) :: rpj
+   real(wp), intent(in) :: rpi
+   real(wp), intent(in) :: ai
+   integer, intent(in) :: lj
+   integer, intent(in) :: li
+   real(wp), intent(in) :: s1d(0:)
+   real(wp), intent(out) :: v1d(3)
+   real(wp), intent(out) :: g1d(3)
+   real(wp), intent(out) :: h1d(3)
+
+   integer :: l, m
+   real(wp) :: vi(0:maxl+2), gi(0:maxl+2), hi(0:maxl+2), vj(0:maxl)
+   real(wp) :: vv(0:maxl2+2), gg(0:maxl2+2), hh(0:maxl2+2), mom(3)
+
+   vi(:) = 0.0_wp
+   gi(:) = 0.0_wp
+   hi(:) = 0.0_wp
+   vj(:) = 0.0_wp
+   vv(:) = 0.0_wp
+   gg(:) = 0.0_wp
+   hh(:) = 0.0_wp
+
+   call add_shifted_monomial(rpj, lj, 1.0_wp, vj)
+   call add_shifted_monomial(rpi, li, 1.0_wp, vi)
+   !>-- d/dRi x**l = 2a x**(l+1) - l x**(l-1)
+   call add_shifted_monomial(rpi, li+1, 2*ai, gi)
+   call add_shifted_monomial(rpi, li-1, -real(li, wp), gi)
+   !>-- d2/dRi2 x**l = 4a**2 x**(l+2) - 2a(2l+1) x**l + l(l-1) x**(l-2)
+   call add_shifted_monomial(rpi, li+2, 4*ai*ai, hi)
+   call add_shifted_monomial(rpi, li, -2*ai*real(2*li+1, wp), hi)
+   call add_shifted_monomial(rpi, li-2, real(li*(li-1), wp), hi)
+
+   do m = 0, lj
+      do l = 0, li + 2
+         vv(l+m) = vv(l+m) + vi(l) * vj(m)
+         gg(l+m) = gg(l+m) + gi(l) * vj(m)
+         hh(l+m) = hh(l+m) + hi(l) * vj(m)
+      end do
+   end do
+
+   v1d(:) = 0.0_wp
+   g1d(:) = 0.0_wp
+   h1d(:) = 0.0_wp
+   do l = 0, li + lj + 2
+      mom(1) = s1d(l)
+      mom(2) = s1d(l+1) + rpj*s1d(l)
+      mom(3) = s1d(l+2) + 2*rpj*s1d(l+1) + rpj*rpj*s1d(l)
+      v1d(:) = v1d + mom * vv(l)
+      g1d(:) = g1d + mom * gg(l)
+      h1d(:) = h1d + mom * hh(l)
+   end do
+end subroutine multipole_hess_1d
+
+pure subroutine multipole_hess_3d(rpj, rpi, ai, lj, li, s1d, ncomp, val, grad, hess)
+   !***********************************
+   !* Value, gradient and Hessian w.r.t. center i of a primitive pair for the
+   !* first ncomp operator components: overlap (1), dipole about center j
+   !* (2-4) and raw quadrupole about center j (5-10 as xx, xy, yy, xz, yz, zz).
+   !***********************************
+   real(wp), intent(in) :: rpj(3)
+   real(wp), intent(in) :: rpi(3)
+   real(wp), intent(in) :: ai
+   integer, intent(in) :: lj(3)
+   integer, intent(in) :: li(3)
+   real(wp), intent(in) :: s1d(0:)
+   integer, intent(in) :: ncomp
+   real(wp), intent(out) :: val(:)
+   real(wp), intent(out) :: grad(:, :)
+   real(wp), intent(out) :: hess(:, :, :)
+
+   !> Moment order plus one in x, y and z for each operator component
+   integer, parameter :: mo(3, 10) = reshape([&
+      & 1, 1, 1, &
+      & 2, 1, 1,  1, 2, 1,  1, 1, 2, &
+      & 3, 1, 1,  2, 2, 1,  1, 3, 1,  2, 1, 2,  1, 2, 2,  1, 1, 3], shape(mo))
+   integer :: k, ic, mx, my, mz
+   real(wp) :: v(3, 3), g(3, 3), h(3, 3)
+
+   do k = 1, 3
+      call multipole_hess_1d(rpj(k), rpi(k), ai, lj(k), li(k), s1d, &
+         & v(:, k), g(:, k), h(:, k))
+   end do
+
+   do ic = 1, ncomp
+      mx = mo(1, ic)
+      my = mo(2, ic)
+      mz = mo(3, ic)
+      val(ic) = v(mx, 1) * v(my, 2) * v(mz, 3)
+      grad(1, ic) = g(mx, 1) * v(my, 2) * v(mz, 3)
+      grad(2, ic) = v(mx, 1) * g(my, 2) * v(mz, 3)
+      grad(3, ic) = v(mx, 1) * v(my, 2) * g(mz, 3)
+      hess(1, 1, ic) = h(mx, 1) * v(my, 2) * v(mz, 3)
+      hess(2, 2, ic) = v(mx, 1) * h(my, 2) * v(mz, 3)
+      hess(3, 3, ic) = v(mx, 1) * v(my, 2) * h(mz, 3)
+      hess(2, 1, ic) = g(mx, 1) * g(my, 2) * v(mz, 3)
+      hess(3, 1, ic) = g(mx, 1) * v(my, 2) * g(mz, 3)
+      hess(3, 2, ic) = v(mx, 1) * g(my, 2) * g(mz, 3)
+      hess(1, 2, ic) = hess(2, 1, ic)
+      hess(1, 3, ic) = hess(3, 1, ic)
+      hess(2, 3, ic) = hess(3, 2, ic)
+   end do
+end subroutine multipole_hess_3d
+
+pure subroutine shift_operator_hess(vec, s, ds, d2s, ddj, d2dj, d2qj, d2di, d2qi)
+   !***********************************
+   !* Move the second derivatives of the dipole and raw quadrupole integrals
+   !* from the origin at center j to the origin at center i, which moves
+   !* with the differentiated center. Second-order analogue of shift_operator.
+   !***********************************
+   real(wp), intent(in) :: vec(3)
+   real(wp), intent(in) :: s
+   real(wp), intent(in) :: ds(3)
+   real(wp), intent(in) :: d2s(3, 3)
+   real(wp), intent(in) :: ddj(3, 3)
+   real(wp), intent(in) :: d2dj(3, 3, 3)
+   real(wp), intent(in) :: d2qj(3, 3, 6)
+   real(wp), intent(out) :: d2di(3, 3, 3)
+   real(wp), intent(out) :: d2qi(3, 3, 6)
+
+   integer, parameter :: cmap(6) = [1, 1, 2, 1, 2, 3], dmap(6) = [1, 2, 2, 3, 3, 3]
+   real(wp), parameter :: unity(3, 3) = reshape([1.0_wp, 0.0_wp, 0.0_wp, &
+      & 0.0_wp, 1.0_wp, 0.0_wp, 0.0_wp, 0.0_wp, 1.0_wp], [3, 3])
+   integer :: a, b, c, d, ic
+
+   do c = 1, 3
+      do b = 1, 3
+         do a = 1, 3
+            d2di(a, b, c) = d2dj(a, b, c) - vec(c)*d2s(a, b) &
+               & - unity(a, c)*ds(b) - unity(b, c)*ds(a)
+         end do
+      end do
+   end do
+
+   do ic = 1, 6
+      c = cmap(ic)
+      d = dmap(ic)
+      do b = 1, 3
+         do a = 1, 3
+            d2qi(a, b, ic) = d2qj(a, b, ic) &
+               & - vec(d)*d2dj(a, b, c) - vec(c)*d2dj(a, b, d) &
+               & - unity(a, d)*ddj(b, c) - unity(b, d)*ddj(a, c) &
+               & - unity(a, c)*ddj(b, d) - unity(b, c)*ddj(a, d) &
+               & + (unity(a, c)*unity(b, d) + unity(a, d)*unity(b, c))*s &
+               & + (unity(a, c)*vec(d) + unity(a, d)*vec(c))*ds(b) &
+               & + (unity(b, c)*vec(d) + unity(b, d)*vec(c))*ds(a) &
+               & + vec(c)*vec(d)*d2s(a, b)
+         end do
+      end do
+   end do
+end subroutine shift_operator_hess
+
+pure subroutine remove_trace(qp)
+   !***********************************
+   !* Project the trace out of one set of Cartesian quadrupole components
+   !* ordered as xx, xy, yy, xz, yz, zz.
+   !***********************************
+   real(wp), intent(inout) :: qp(:)
+
+   real(wp) :: tr
+
+   tr = 0.5_wp * (qp(1) + qp(3) + qp(6))
+   qp(:) = 1.5_wp * qp
+   qp(1) = qp(1) - tr
+   qp(3) = qp(3) - tr
+   qp(6) = qp(6) - tr
+end subroutine remove_trace
+
+pure subroutine overlap_hess_cgto(cgtoj, cgtoi, r2, vec, intcut, overlap, doverlap, &
+      & d2overlap)
+   !***********************************
+   !* Overlap integrals of a shell pair with their first and second
+   !* derivative w.r.t. the position of center i.
+   !***********************************
+   !> Description of contracted Gaussian function on center j
+   type(cgto_type), intent(in) :: cgtoj
+   !> Description of contracted Gaussian function on center i
+   type(cgto_type), intent(in) :: cgtoi
+   !> Square distance between center i and j
+   real(wp), intent(in) :: r2
+   !> Distance vector between center i and j, ri - rj
+   real(wp), intent(in) :: vec(3)
+   !> Maximum value of integral prefactor to consider
+   real(wp), intent(in) :: intcut
+   !> Overlap integrals for the given pair i  and j
+   real(wp), intent(out) :: overlap(msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Overlap integral gradient for the given pair i  and j
+   real(wp), intent(out) :: doverlap(3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Overlap integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2overlap(3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+
+   integer :: ip, jp, mli, mlj, l
+   real(wp) :: eab, oab, est, s1d(0:maxl2+4), rpi(3), rpj(3), cc, pre
+   real(wp) :: val(1), grad(3, 1), hess(3, 3, 1)
+   real(wp) :: s3d(mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: ds3d(3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2s3d(3, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+
+   s3d(:, :) = 0.0_wp
+   ds3d(:, :, :) = 0.0_wp
+   d2s3d(:, :, :, :) = 0.0_wp
+
+   do ip = 1, cgtoi%nprim
+      do jp = 1, cgtoj%nprim
+         eab = cgtoi%alpha(ip) + cgtoj%alpha(jp)
+         oab = 1.0_wp/eab
+         est = cgtoi%alpha(ip) * cgtoj%alpha(jp) * r2 * oab
+         if (est > intcut) cycle
+         pre = exp(-est) * sqrtpi3*sqrt(oab)**3
+         rpi = -vec * cgtoj%alpha(jp) * oab
+         rpj = +vec * cgtoi%alpha(ip) * oab
+         do l = 0, cgtoi%ang + cgtoj%ang + 4
+            s1d(l) = overlap_1d(l, eab)
+         end do
+         cc = cgtoi%coeff(ip) * cgtoj%coeff(jp) * pre
+         do mli = 1, mlao(cgtoi%ang)
+            do mlj = 1, mlao(cgtoj%ang)
+               call multipole_hess_3d(rpj, rpi, cgtoi%alpha(ip), &
+                  & lx(:, mlj+lmap(cgtoj%ang)), lx(:, mli+lmap(cgtoi%ang)), &
+                  & s1d, 1, val, grad, hess)
+               s3d(mlj, mli) = s3d(mlj, mli) + cc*val(1)
+               ds3d(:, mlj, mli) = ds3d(:, mlj, mli) + cc*grad(:, 1)
+               d2s3d(:, :, mlj, mli) = d2s3d(:, :, mlj, mli) + cc*hess(:, :, 1)
+            end do
+         end do
+      end do
+   end do
+
+   call transform0(cgtoj%ang, cgtoi%ang, s3d, overlap, .true., .true.)
+   call transform1(cgtoj%ang, cgtoi%ang, ds3d, doverlap, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, d2s3d, d2overlap, .true., .true.)
+
+end subroutine overlap_hess_cgto
+
+pure subroutine multipole_hess_cgto(cgtoj, cgtoi, r2, vec, intcut, overlap, dpint, qpint, &
+      & doverlap, ddpintj, dqpintj, ddpinti, dqpinti, d2overlap, d2dpintj, d2qpintj, &
+      & d2dpinti, d2qpinti)
+   !***********************************
+   !* Overlap, dipole and traceless quadrupole integrals of a shell pair with
+   !* their first and second derivative w.r.t. the position of center i.
+   !* Values, first derivatives and the j/i naming of the derivative arrays
+   !* follow multipole_grad_cgto. The second derivatives are indexed as
+   !* (direction, direction, operator component, ao j, ao i).
+   !***********************************
+   !> Description of contracted Gaussian function on center j
+   type(cgto_type), intent(in) :: cgtoj
+   !> Description of contracted Gaussian function on center i
+   type(cgto_type), intent(in) :: cgtoi
+   !> Square distance between center i and j
+   real(wp), intent(in) :: r2
+   !> Distance vector between center i and j, ri - rj
+   real(wp), intent(in) :: vec(3)
+   !> Maximum value of integral prefactor to consider
+   real(wp), intent(in) :: intcut
+   !> Overlap integrals for the given pair i  and j
+   real(wp), intent(out) :: overlap(msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Dipole moment integrals for the given pair i  and j
+   real(wp), intent(out) :: dpint(3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Quadrupole moment integrals for the given pair i  and j
+   real(wp), intent(out) :: qpint(6, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Overlap integral gradient for the given pair i  and j
+   real(wp), intent(out) :: doverlap(3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Dipole moment integral gradient for the given pair i  and j
+   real(wp), intent(out) :: ddpintj(3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Quadrupole moment integral gradient for the given pair i  and j
+   real(wp), intent(out) :: dqpintj(3, 6, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Dipole moment integral gradient for the given pair i  and j
+   real(wp), intent(out) :: ddpinti(3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Quadrupole moment integral gradient for the given pair i  and j
+   real(wp), intent(out) :: dqpinti(3, 6, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Overlap integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2overlap(3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Dipole moment integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2dpintj(3, 3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Quadrupole moment integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2qpintj(3, 3, 6, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Dipole moment integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2dpinti(3, 3, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   !> Quadrupole moment integral Hessian for the given pair i  and j
+   real(wp), intent(out) :: d2qpinti(3, 3, 6, msao(cgtoj%ang), msao(cgtoi%ang))
+
+   integer :: ip, jp, mli, mlj, l, a, b, nci, ncj, nsi, nsj
+   real(wp) :: eab, oab, est, s1d(0:maxl2+4), rpi(3), rpj(3), cc, pre
+   real(wp) :: val(10), grad(3, 10), hess(3, 3, 10), d2di(3, 3, 3), d2qi(3, 3, 6)
+   real(wp) :: s3d(mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d3dj(3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: q3dj(6, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: ds3d(3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: dd3di(3, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: dq3di(3, 6, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: dd3dj(3, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: dq3dj(3, 6, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2s3d(3, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   !>-- the two directions share the leading dimension, as transform2 expects
+   real(wp) :: d2d3dj(9, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2q3dj(9, 6, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2d3di(9, 3, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2q3di(9, 6, mlao(cgtoj%ang), mlao(cgtoi%ang))
+   real(wp) :: d2dsph(9, 3, msao(cgtoj%ang), msao(cgtoi%ang))
+   real(wp) :: d2qsph(9, 6, msao(cgtoj%ang), msao(cgtoi%ang))
+
+   ncj = mlao(cgtoj%ang)
+   nci = mlao(cgtoi%ang)
+   nsj = msao(cgtoj%ang)
+   nsi = msao(cgtoi%ang)
+
+   s3d(:, :) = 0.0_wp
+   d3dj(:, :, :) = 0.0_wp
+   q3dj(:, :, :) = 0.0_wp
+   ds3d(:, :, :) = 0.0_wp
+   dd3dj(:, :, :, :) = 0.0_wp
+   dq3dj(:, :, :, :) = 0.0_wp
+   d2s3d(:, :, :, :) = 0.0_wp
+   d2d3dj(:, :, :, :) = 0.0_wp
+   d2q3dj(:, :, :, :) = 0.0_wp
+
+   do ip = 1, cgtoi%nprim
+      do jp = 1, cgtoj%nprim
+         eab = cgtoi%alpha(ip) + cgtoj%alpha(jp)
+         oab = 1.0_wp/eab
+         est = cgtoi%alpha(ip) * cgtoj%alpha(jp) * r2 * oab
+         if (est > intcut) cycle
+         pre = exp(-est) * sqrtpi3*sqrt(oab)**3
+         rpi = -vec * cgtoj%alpha(jp) * oab
+         rpj = +vec * cgtoi%alpha(ip) * oab
+         do l = 0, cgtoi%ang + cgtoj%ang + 4
+            s1d(l) = overlap_1d(l, eab)
+         end do
+         cc = cgtoi%coeff(ip) * cgtoj%coeff(jp) * pre
+         do mli = 1, nci
+            do mlj = 1, ncj
+               call multipole_hess_3d(rpj, rpi, cgtoi%alpha(ip), &
+                  & lx(:, mlj+lmap(cgtoj%ang)), lx(:, mli+lmap(cgtoi%ang)), &
+                  & s1d, 10, val, grad, hess)
+               s3d(mlj, mli) = s3d(mlj, mli) + cc*val(1)
+               d3dj(:, mlj, mli) = d3dj(:, mlj, mli) + cc*val(2:4)
+               q3dj(:, mlj, mli) = q3dj(:, mlj, mli) + cc*val(5:10)
+               ds3d(:, mlj, mli) = ds3d(:, mlj, mli) + cc*grad(:, 1)
+               dd3dj(:, :, mlj, mli) = dd3dj(:, :, mlj, mli) + cc*grad(:, 2:4)
+               dq3dj(:, :, mlj, mli) = dq3dj(:, :, mlj, mli) + cc*grad(:, 5:10)
+               d2s3d(:, :, mlj, mli) = d2s3d(:, :, mlj, mli) + cc*hess(:, :, 1)
+               d2d3dj(:, :, mlj, mli) = d2d3dj(:, :, mlj, mli) &
+                  & + cc*reshape(hess(:, :, 2:4), [9, 3])
+               d2q3dj(:, :, mlj, mli) = d2q3dj(:, :, mlj, mli) &
+                  & + cc*reshape(hess(:, :, 5:10), [9, 6])
+            end do
+         end do
+      end do
+   end do
+
+   do mli = 1, nci
+      do mlj = 1, ncj
+         call shift_operator(vec, s3d(mlj, mli), d3dj(:, mlj, mli), q3dj(:, mlj, mli), &
+            & ds3d(:, mlj, mli), dd3dj(:, :, mlj, mli), dq3dj(:, :, mlj, mli), &
+            & dd3di(:, :, mlj, mli), dq3di(:, :, mlj, mli))
+         call shift_operator_hess(vec, s3d(mlj, mli), ds3d(:, mlj, mli), &
+            & d2s3d(:, :, mlj, mli), dd3dj(:, :, mlj, mli), &
+            & reshape(d2d3dj(:, :, mlj, mli), [3, 3, 3]), &
+            & reshape(d2q3dj(:, :, mlj, mli), [3, 3, 6]), d2di, d2qi)
+         d2d3di(:, :, mlj, mli) = reshape(d2di, [9, 3])
+         d2q3di(:, :, mlj, mli) = reshape(d2qi, [9, 6])
+      end do
+   end do
+
+   call transform0(cgtoj%ang, cgtoi%ang, s3d, overlap, .true., .true.)
+   call transform1(cgtoj%ang, cgtoi%ang, d3dj, dpint, .true., .true.)
+   call transform1(cgtoj%ang, cgtoi%ang, q3dj, qpint, .true., .true.)
+   call transform1(cgtoj%ang, cgtoi%ang, ds3d, doverlap, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, dd3dj, ddpintj, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, dq3dj, dqpintj, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, dd3di, ddpinti, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, dq3di, dqpinti, .true., .true.)
+   call transform2(cgtoj%ang, cgtoi%ang, d2s3d, d2overlap, .true., .true.)
+
+   call transform2(cgtoj%ang, cgtoi%ang, d2d3dj, d2dsph, .true., .true.)
+   d2dpintj(:, :, :, :, :) = reshape(d2dsph, [3, 3, 3, nsj, nsi])
+   call transform2(cgtoj%ang, cgtoi%ang, d2d3di, d2dsph, .true., .true.)
+   d2dpinti(:, :, :, :, :) = reshape(d2dsph, [3, 3, 3, nsj, nsi])
+   call transform2(cgtoj%ang, cgtoi%ang, d2q3dj, d2qsph, .true., .true.)
+   d2qpintj(:, :, :, :, :) = reshape(d2qsph, [3, 3, 6, nsj, nsi])
+   call transform2(cgtoj%ang, cgtoi%ang, d2q3di, d2qsph, .true., .true.)
+   d2qpinti(:, :, :, :, :) = reshape(d2qsph, [3, 3, 6, nsj, nsi])
+
+   !>-- remove trace from quadrupole integrals and their derivatives
+   do mli = 1, nsi
+      do mlj = 1, nsj
+         call remove_trace(qpint(:, mlj, mli))
+         do a = 1, 3
+            call remove_trace(dqpintj(a, :, mlj, mli))
+            call remove_trace(dqpinti(a, :, mlj, mli))
+            do b = 1, 3
+               call remove_trace(d2qpintj(b, a, :, mlj, mli))
+               call remove_trace(d2qpinti(b, a, :, mlj, mli))
+            end do
+         end do
+      end do
+   end do
+
+end subroutine multipole_hess_cgto
 
 end module tblite_integral_native_integrals

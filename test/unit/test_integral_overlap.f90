@@ -26,7 +26,7 @@ module test_integral_overlap
    use tblite_integral_diat_trafo, only : setup_diat_trafo, diat_trafo_cache, &
       & diat_trafo
    use tblite_integral_native_integrals, only : overlap_cgto, overlap_grad_cgto, &
-      & msao, smap, sdim, get_overlap
+      & overlap_hess_cgto, msao, smap, sdim, get_overlap
 
    implicit none
    private
@@ -64,6 +64,10 @@ subroutine collect_integral_overlap(testsuite)
       new_unittest("overlap-grad-pp", test_overlap_grad_pp), &
       new_unittest("overlap-grad-dd", test_overlap_grad_dd), &
       new_unittest("overlap-grad-ff", test_overlap_grad_ff), &
+      new_unittest("overlap-hess-ss", test_overlap_hess_ss), &
+      new_unittest("overlap-hess-pd", test_overlap_hess_pd), &
+      new_unittest("overlap-hess-dd", test_overlap_hess_dd), &
+      new_unittest("overlap-hess-ff", test_overlap_hess_ff), &
       new_unittest("overlap-diat-grad-ss", test_overlap_diat_grad_ss), &
       new_unittest("overlap-diat-grad-ss_z", test_overlap_diat_grad_ss_z), &
       new_unittest("overlap-diat-grad-sp", test_overlap_diat_grad_sp), &
@@ -1758,6 +1762,106 @@ subroutine test_overlap_grad_ff(error)
    if (allocated(error)) return
 
 end subroutine test_overlap_grad_ff
+
+
+subroutine test_overlap_hess_gen(error, ni, li, nj, lj)
+   !***********************************
+   !* Compare the overlap Hessian of a shell pair against finite differences
+   !* of the analytic gradient, and its value and gradient against
+   !* overlap_grad_cgto.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> Principal and angular quantum number of the shell on center i
+   integer, intent(in) :: ni, li
+   !> Principal and angular quantum number of the shell on center j
+   integer, intent(in) :: nj, lj
+
+   integer, parameter :: ng = 6
+   integer :: stat, i
+   type(cgto_type) :: cgtoi, cgtoj
+   real(wp) :: vec(3), r2
+   real(wp), allocatable :: overlap(:, :), doverlap(:, :, :), d2overlap(:, :, :, :)
+   real(wp), allocatable :: sref(:, :), dsref(:, :, :), dsr(:, :, :), dsl(:, :, :)
+   real(wp), allocatable :: numhess(:, :, :, :)
+   real(wp), parameter :: step = 1.0e-5_wp
+
+   call slater_to_gauss(ng, ni, li, 1.0_wp, cgtoi, .true., stat)
+   call slater_to_gauss(ng, nj, lj, 1.2_wp, cgtoj, .true., stat)
+
+   allocate(overlap(msao(lj), msao(li)), doverlap(3, msao(lj), msao(li)), &
+      & d2overlap(3, 3, msao(lj), msao(li)), numhess(3, 3, msao(lj), msao(li)), &
+      & sref(msao(lj), msao(li)), dsref(3, msao(lj), msao(li)), &
+      & dsr(3, msao(lj), msao(li)), dsl(3, msao(lj), msao(li)))
+
+   vec(:) = [0.3_wp, -0.5_wp, 0.7_wp]
+   r2 = sum(vec**2)
+
+   call overlap_hess_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, overlap, doverlap, d2overlap)
+   call overlap_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, sref, dsref)
+
+   if (any(abs(overlap - sref) > thr)) then
+      call test_failed(error, "Overlap from Hessian kernel does not match")
+      return
+   end if
+   if (any(abs(doverlap - dsref) > thr)) then
+      call test_failed(error, "Overlap gradient from Hessian kernel does not match")
+      return
+   end if
+
+   do i = 1, 3
+      vec(i) = vec(i) + step
+      r2 = sum(vec**2)
+      call overlap_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, sref, dsr)
+      vec(i) = vec(i) - 2*step
+      r2 = sum(vec**2)
+      call overlap_grad_cgto(cgtoj, cgtoi, r2, vec, 100.0_wp, sref, dsl)
+      vec(i) = vec(i) + step
+      numhess(i, :, :, :) = 0.5_wp * (dsr - dsl) / step
+   end do
+
+   if (any(abs(d2overlap - numhess) > thr1*10)) then
+      call test_failed(error, "Overlap Hessian does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(d2overlap - numhess))
+   end if
+
+end subroutine test_overlap_hess_gen
+
+subroutine test_overlap_hess_ss(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_overlap_hess_gen(error, 2, 0, 1, 0)
+
+end subroutine test_overlap_hess_ss
+
+subroutine test_overlap_hess_pd(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_overlap_hess_gen(error, 2, 1, 3, 2)
+
+end subroutine test_overlap_hess_pd
+
+subroutine test_overlap_hess_dd(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_overlap_hess_gen(error, 3, 2, 4, 2)
+
+end subroutine test_overlap_hess_dd
+
+subroutine test_overlap_hess_ff(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_overlap_hess_gen(error, 4, 3, 5, 3)
+
+end subroutine test_overlap_hess_ff
 
 subroutine test_overlap_diat_grad_gen(vec, ksig, kpi, kdel, cgtoi, cgtoj, error)
    !> Vector between the two centers
