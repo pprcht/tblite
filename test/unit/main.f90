@@ -43,6 +43,7 @@ program tester
    use test_partition, only : collect_partition
    use test_post_processing, only : collect_post_processing
    use test_repulsion, only : collect_repulsion
+   use test_response, only : collect_response
    use test_slater_expansion, only : collect_slater_expansion
    use test_solvation_born, only : collect_solvation_born
    use test_solvation_cds, only: collect_solvation_cds
@@ -69,6 +70,7 @@ program tester
       new_testsuite("trexio", collect_trexio), &
       new_testsuite("fit", collect_fit), &
       new_testsuite("repulsion", collect_repulsion), &
+      new_testsuite("response", collect_response), &
       new_testsuite("npy", collect_npy), &
       new_testsuite("npz", collect_npz), &
       new_testsuite("partition", collect_partition), &

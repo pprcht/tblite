@@ -39,6 +39,7 @@ set(
   "partition"
   "post-processing"
   "repulsion"
+  "response"
   "slater-expansion"
   "spin"
   "solvation-born"
