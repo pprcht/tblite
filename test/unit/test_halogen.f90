@@ -6,6 +6,7 @@ module test_halogen
    use mstore, only : get_structure
    use tblite_classical_halogen, only : halogen_correction, new_halogen_correction
    use tblite_container, only : container_cache
+   use tblite_hessian_halogen, only : get_halogen_hessian
    implicit none
    private
 
@@ -47,7 +48,8 @@ subroutine collect_halogen(testsuite)
    testsuite = [ &
       & new_unittest("Br2-NH3", test_br2nh3), &
       & new_unittest("Br2-OCN2", test_br2och2), &
-      & new_unittest("FI-NCH", test_finch) &
+      & new_unittest("FI-NCH", test_finch), &
+      & new_unittest("Br2-OCH2-hessian", test_br2och2_hessian) &
       & ]
 
 end subroutine collect_halogen
@@ -139,6 +141,55 @@ subroutine test_br2och2(error)
    end if
 
 end subroutine test_br2och2
+
+
+subroutine test_br2och2_hessian(error)
+   !***********************************
+   !* Compare the analytic Hessian against finite differences of the gradient.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(halogen_correction) :: xb
+   type(container_cache) :: cache
+   integer :: iat, ic
+   real(wp) :: sigma(3, 3)
+   real(wp), allocatable :: energy(:), gr(:, :), gl(:, :)
+   real(wp), allocatable :: hessian(:, :), numhess(:, :)
+   real(wp), parameter :: step = 1.0e-4_wp
+
+   call BrBr_OCH2(mol)
+   call new_halogen_correction(xb, mol, 0.44_wp, 1.3_wp, halogen_bond(mol%num))
+
+   allocate(energy(mol%nat), gr(3, mol%nat), gl(3, mol%nat))
+   allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
+
+   hessian(:, :) = 0.0_wp
+   call get_halogen_hessian(xb, mol, hessian, error)
+   if (allocated(error)) return
+
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         energy(:) = 0.0_wp
+         gr(:, :) = 0.0_wp
+         gl(:, :) = 0.0_wp
+         mol%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         call xb%get_engrad(mol, cache, energy, gr, sigma)
+         mol%xyz(ic, iat) = mol%xyz(ic, iat) - 2*step
+         call xb%get_engrad(mol, cache, energy, gl, sigma)
+         mol%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         numhess(:, 3*(iat - 1) + ic) = reshape(gr - gl, [3*mol%nat]) / (2*step)
+      end do
+   end do
+
+   if (any(abs(hessian - numhess) > thr2)) then
+      call test_failed(error, "Hessian does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(hessian - numhess))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(numhess))
+   end if
+
+end subroutine test_br2och2_hessian
 
 
 subroutine test_finch(error)
