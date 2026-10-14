@@ -25,16 +25,15 @@ module tblite_hessian_dispersion
    use dftd4_model_d4, only : d4_model
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
-   use tblite_blas, only : gemm
    use tblite_cutoff, only : get_lattice_points
    use tblite_disp, only : dispersion_type
    use tblite_disp_d3, only : d3_dispersion
    use tblite_disp_d4, only : d4_dispersion
-   use tblite_hessian_pair, only : get_pair_block, add_pair_hessian
+   use tblite_hessian_pair, only : get_pair_block, add_pair_hessian, add_ncoord_hessian
    implicit none
    private
 
-   public :: get_dispersion_hessian
+   public :: get_dispersion_hessian, get_dispersion_potential_derivative
 
 contains
 
@@ -96,13 +95,13 @@ subroutine get_d4_twobody_hessian(disp, mol, qat, hessian, error)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   integer :: nat, ndim, mref, iat, jat, kat, izp, jzp, itr, ii, jj
+   integer :: nat, ndim, mref, iat, jat, izp, jzp, itr, ii, jj
    real(wp) :: vec(3), r1, r2, cutoff2, rrij, r0ij, t6, t8, f, dfdr2, d2fdr22
    real(wp) :: sw, dswdr2, d2swdr22, fsw, df, d2f, block(3, 3), dfvec(3)
    real(wp), allocatable :: cn(:), dcndr(:, :, :), dcndL(:, :, :), lattr(:, :)
    real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwd2cn(:, :, :)
    real(wp), allocatable :: c6(:, :), dc6dcn(:, :), d2c6dcn2(:, :), d2c6dcnij(:, :)
-   real(wp), allocatable :: dEdcn(:), dEdcndr(:, :), dEdcndcn(:, :), dr(:, :), tmp(:, :)
+   real(wp), allocatable :: dEdcn(:), dEdcndr(:, :), dEdcndcn(:, :)
 
    nat = mol%nat
    ndim = 3*nat
@@ -181,18 +180,132 @@ subroutine get_d4_twobody_hessian(disp, mol, qat, hessian, error)
    call get_lattice_points(mol%periodic, mol%lattice, disp%cutoff%cn, lattr)
    call disp%ncoord%add_coordination_number_hessian(mol, lattr, dEdcn, hessian)
 
-   !>-- derivative of the coordination number of kat w.r.t. the position of iat
-   allocate(dr(ndim, nat), tmp(ndim, nat))
-   do kat = 1, nat
-      do iat = 1, nat
-         dr(3*(iat - 1)+1:3*iat, kat) = dcndr(:, iat, kat)
-      end do
-   end do
-
-   call gemm(dEdcndr, dr, hessian, transb="t", beta=1.0_wp)
-   call gemm(dr, dEdcndr, hessian, transb="t", beta=1.0_wp)
-   call gemm(dr, dEdcndcn, tmp)
-   call gemm(tmp, dr, hessian, transb="t", beta=1.0_wp)
+   call add_ncoord_hessian(hessian, dcndr, dEdcndr, dEdcndcn)
 end subroutine get_d4_twobody_hessian
+
+subroutine get_damped_radial(disp, izp, jzp, r2, fsw, df)
+   !***********************************
+   !* Damped radial function of the two-body dispersion energy including
+   !* the smooth cutoff and its derivative w.r.t. the distance.
+   !***********************************
+   !> Instance of the dispersion container
+   type(d4_dispersion), intent(in) :: disp
+   !> Species of the two atoms
+   integer, intent(in) :: izp, jzp
+   !> Squared distance
+   real(wp), intent(in) :: r2
+   !> Radial function
+   real(wp), intent(out) :: fsw
+   !> Derivative of the radial function w.r.t. the distance
+   real(wp), intent(out) :: df
+
+   real(wp) :: rrij, r0ij, t6, t8, f, dfdr2, sw, dswdr2, d2swdr22
+
+   rrij = 3*disp%model%r4r2(izp)*disp%model%r4r2(jzp)
+   r0ij = disp%param%a1*sqrt(rrij) + disp%param%a2
+   t6 = 1.0_wp/(r2**3 + r0ij**6)
+   t8 = 1.0_wp/(r2**4 + r0ij**8)
+   f = disp%param%s6*t6 + disp%param%s8*rrij*t8
+   dfdr2 = -3*disp%param%s6*r2**2*t6**2 - 4*disp%param%s8*rrij*r2**3*t8**2
+   call smooth_cutoff_r2(r2, disp%cutoff%disp2, disp%cutoff%width2, sw, dswdr2, d2swdr22)
+   fsw = sw*f
+   df = 2*sqrt(r2)*(dswdr2*f + sw*dfdr2)
+end subroutine get_damped_radial
+
+subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
+   !***********************************
+   !* Derivative of the atomic potential of the self-consistent dispersion
+   !* w.r.t. the atomic positions at fixed charges, dvat(iat, ic, kat) for
+   !* the potential on iat and the displacement of kat. The potential is
+   !* v_i = -sum_j dC6_ij/dq_i F(r_ij) and depends on the positions via the
+   !* radial function and via the coordination numbers in the reference
+   !* weights, gw = w(CN) zeta(q).
+   !* Interactions of an atom with its own periodic images are not included.
+   !***********************************
+   !> Instance of the dispersion container
+   class(dispersion_type), intent(in) :: disp
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Atomic partial charges
+   real(wp), intent(in) :: qat(:)
+   !> Derivative of the atomic potential
+   real(wp), intent(out) :: dvat(:, :, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: nat, mref, iat, jat, izp, jzp, itr, iref, jref
+   real(wp) :: vec(3), r2, cutoff2, fsw, df, dfvec(3), refc6
+   real(wp) :: dc6dq, d2c6dqdcni, d2c6dqdcnj
+   real(wp), allocatable :: cn(:), dcndr(:, :, :), dcndL(:, :, :), lattr(:, :)
+   real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwdq(:, :, :), gwdcndq(:, :)
+   real(wp), allocatable :: dvdcn(:, :)
+
+   nat = mol%nat
+   dvat(:, :, :) = 0.0_wp
+
+   select type(disp)
+   type is (d4_dispersion)
+      allocate(cn(nat), dcndr(3, nat, nat), dcndL(3, 3, nat))
+      call get_lattice_points(mol%periodic, mol%lattice, disp%cutoff%cn, lattr)
+      call disp%ncoord%get_coordination_number(mol, lattr, cn, dcndr, dcndL)
+
+      select type(model => disp%model)
+      type is (d4_model)
+         mref = maxval(model%ref)
+         allocate(gwvec(mref, nat, model%ncoup), gwdcn(mref, nat, model%ncoup), &
+            & gwdq(mref, nat, model%ncoup))
+         allocate(gwdcndq(mref, nat), dvdcn(nat, nat), source=0.0_wp)
+         call model%weight_references(mol, cn, qat, gwvec, gwdcn, gwdq)
+
+         !>-- the weights factorize, hence the mixed derivative is the product
+         !>   of the logarithmic derivatives
+         where(abs(gwvec(:, :, 1)) > tiny(1.0_wp))
+            gwdcndq = gwdcn(:, :, 1) * gwdq(:, :, 1) / gwvec(:, :, 1)
+         end where
+
+         cutoff2 = disp%cutoff%disp2**2
+         call get_lattice_points(mol%periodic, mol%lattice, disp%cutoff%disp2, lattr)
+         do iat = 1, nat
+            izp = mol%id(iat)
+            do jat = 1, nat
+               if (iat == jat) cycle
+               jzp = mol%id(jat)
+               dc6dq = 0.0_wp
+               d2c6dqdcni = 0.0_wp
+               d2c6dqdcnj = 0.0_wp
+               do iref = 1, model%ref(izp)
+                  do jref = 1, model%ref(jzp)
+                     refc6 = model%c6(iref, jref, izp, jzp)
+                     dc6dq = dc6dq + gwdq(iref, iat, 1)*gwvec(jref, jat, 1)*refc6
+                     d2c6dqdcni = d2c6dqdcni + gwdcndq(iref, iat)*gwvec(jref, jat, 1)*refc6
+                     d2c6dqdcnj = d2c6dqdcnj + gwdq(iref, iat, 1)*gwdcn(jref, jat, 1)*refc6
+                  end do
+               end do
+               do itr = 1, size(lattr, 2)
+                  vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat) - lattr(:, itr)
+                  r2 = sum(vec**2)
+                  if (r2 > cutoff2 .or. r2 < epsilon(1.0_wp)) cycle
+                  call get_damped_radial(disp, izp, jzp, r2, fsw, df)
+                  dfvec(:) = dc6dq*df*vec/sqrt(r2)
+                  dvat(iat, :, iat) = dvat(iat, :, iat) - dfvec
+                  dvat(iat, :, jat) = dvat(iat, :, jat) + dfvec
+                  dvdcn(iat, iat) = dvdcn(iat, iat) - fsw*d2c6dqdcni
+                  dvdcn(iat, jat) = dvdcn(iat, jat) - fsw*d2c6dqdcnj
+               end do
+            end do
+         end do
+
+         do iat = 1, nat
+            do jat = 1, nat
+               dvat(iat, :, :) = dvat(iat, :, :) + dvdcn(iat, jat)*dcndr(:, :, jat)
+            end do
+         end do
+      class default
+         call fatal_error(error, "Dispersion Hessian is only available for the D4 model")
+      end select
+   class default
+      continue
+   end select
+end subroutine get_dispersion_potential_derivative
 
 end module tblite_hessian_dispersion

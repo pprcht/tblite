@@ -15,8 +15,11 @@
 
 srcs += files(
   'bicgstab.f90',
+  'cpscc.f90',
   'density.f90',
   'field.f90',
+  'integral.f90',
   'kernel.f90',
+  'nuclear.f90',
   'polarizability.f90',
 )

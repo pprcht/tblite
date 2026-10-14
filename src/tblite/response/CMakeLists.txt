@@ -18,9 +18,12 @@ set(dir "${CMAKE_CURRENT_SOURCE_DIR}")
 list(
   APPEND srcs
   "${dir}/bicgstab.f90"
+  "${dir}/cpscc.f90"
   "${dir}/density.f90"
   "${dir}/field.f90"
+  "${dir}/integral.f90"
   "${dir}/kernel.f90"
+  "${dir}/nuclear.f90"
   "${dir}/polarizability.f90"
 )
 

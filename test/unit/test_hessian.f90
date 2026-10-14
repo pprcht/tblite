@@ -21,18 +21,26 @@ module test_hessian
    use mctc_io, only : structure_type
    use mstore, only : get_structure
    use tblite_container, only : container_cache
-   use tblite_hessian_dispersion, only : get_dispersion_hessian
+   use tblite_context_type, only : context_type
+   use tblite_hessian_dispersion, only : get_dispersion_hessian, &
+      & get_dispersion_potential_derivative
+   use tblite_hessian_multipole, only : get_multipole_hessian, &
+      & get_multipole_potential_derivative
    use tblite_hessian_repulsion, only : get_repulsion_hessian
+   use tblite_hessian_xtb, only : xtb_hessian
+   use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
    use tblite_xtb_gfn1, only : new_gfn1_calculator
    use tblite_xtb_gfn2, only : new_gfn2_calculator
+   use tblite_xtb_singlepoint, only : xtb_singlepoint
    implicit none
    private
 
    public :: collect_hessian
 
    real(wp), parameter :: thr = 1.0e-8_wp
+   real(wp), parameter :: acc = 1.0e-6_wp
    real(wp), parameter :: kt = 300.0_wp * 3.166808578545117e-06_wp
 
    abstract interface
@@ -59,7 +67,13 @@ subroutine collect_hessian(testsuite)
       new_unittest("repulsion-gfn1", test_repulsion_gfn1), &
       new_unittest("repulsion-gfn2", test_repulsion_gfn2), &
       new_unittest("dispersion-d3", test_dispersion_d3), &
-      new_unittest("dispersion-d4", test_dispersion_d4) &
+      new_unittest("dispersion-d4", test_dispersion_d4), &
+      new_unittest("dispersion-potential", test_dispersion_potential), &
+      new_unittest("multipole-hessian", test_multipole_hessian), &
+      new_unittest("multipole-potential", test_multipole_potential), &
+      new_unittest("gfn1-hessian", test_hessian_gfn1), &
+      new_unittest("gfn2-hessian", test_hessian_gfn2), &
+      new_unittest("gfn1-hessian-smearing", test_hessian_gfn1_smearing) &
       ]
 
 end subroutine collect_hessian
@@ -259,5 +273,296 @@ subroutine test_dispersion_d4(error)
    call test_dispersion_gen(error, mol, calc)
 
 end subroutine test_dispersion_d4
+
+subroutine test_dispersion_potential(error)
+   !***********************************
+   !* Compare the derivative of the dispersion potential at fixed charges
+   !* against finite differences of the potential.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iat, ic
+   type(structure_type) :: mol, displ
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   type(potential_type) :: potr, potl
+   real(wp), allocatable :: dvat(:, :, :), nvat(:, :, :)
+   real(wp), parameter :: step = 1.0e-4_wp
+
+   call get_structure(mol, "MB16-43", "04")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call set_moments(wfn)
+   call new_potential(potr, mol, calc%bas, 1)
+   call new_potential(potl, mol, calc%bas, 1)
+
+   allocate(dvat(mol%nat, 3, mol%nat), nvat(mol%nat, 3, mol%nat))
+   call get_dispersion_potential_derivative(calc%dispersion, mol, wfn%qat(:, 1), dvat, error)
+   if (allocated(error)) return
+
+   displ = mol
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         call get_potential(displ, potr)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) - step
+         call get_potential(displ, potl)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat)
+         nvat(:, ic, iat) = (potr%vat(:, 1) - potl%vat(:, 1)) / (2*step)
+      end do
+   end do
+
+   if (any(abs(dvat - nvat) > thr)) then
+      call test_failed(error, "Potential derivative does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(dvat - nvat))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(nvat))
+   end if
+
+contains
+
+   subroutine get_potential(geo, pot)
+      type(structure_type), intent(in) :: geo
+      type(potential_type), intent(inout) :: pot
+
+      type(container_cache) :: cache
+
+      call pot%reset
+      call calc%dispersion%update(geo, cache)
+      call calc%dispersion%get_potential(geo, cache, wfn, pot)
+   end subroutine get_potential
+
+end subroutine test_dispersion_potential
+
+subroutine set_moments(wfn)
+   !***********************************
+   !* Fill a wavefunction with an arbitrary fixed set of atomic charges,
+   !* dipole and traceless quadrupole moments.
+   !***********************************
+   !> Wavefunction data
+   type(wavefunction_type), intent(inout) :: wfn
+
+   integer :: iat, k
+
+   do iat = 1, size(wfn%qat, 1)
+      wfn%qat(iat, 1) = 0.3_wp * sin(real(iat, wp))
+      do k = 1, 3
+         wfn%dpat(k, iat, 1) = 0.2_wp * cos(real(3*iat + k, wp))
+      end do
+      do k = 1, 6
+         wfn%qpat(k, iat, 1) = 0.4_wp * sin(real(7*iat + 2*k, wp))
+      end do
+      wfn%qpat(6, iat, 1) = -wfn%qpat(1, iat, 1) - wfn%qpat(3, iat, 1)
+   end do
+end subroutine set_moments
+
+subroutine test_multipole_hessian(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   real(wp), allocatable :: hessian(:, :), numhess(:, :)
+
+   call get_structure(mol, "MB16-43", "06")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call set_moments(wfn)
+
+   allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
+   hessian(:, :) = 0.0_wp
+   call get_multipole_hessian(calc%coulomb%aes2, mol, wfn%qat(:, 1), wfn%dpat(:, :, 1), &
+      & wfn%qpat(:, :, 1), hessian)
+   call get_numerical_hessian(mol, get_gradient, numhess)
+   call compare_hessian(error, hessian, numhess)
+
+contains
+
+   subroutine get_gradient(displ, gradient)
+      type(structure_type), intent(in) :: displ
+      real(wp), intent(out) :: gradient(:, :)
+
+      type(container_cache) :: cache
+      real(wp) :: sigma(3, 3)
+
+      gradient(:, :) = 0.0_wp
+      sigma(:, :) = 0.0_wp
+      call calc%coulomb%aes2%update(displ, cache)
+      call calc%coulomb%aes2%get_gradient(displ, cache, wfn, gradient, sigma)
+   end subroutine get_gradient
+
+end subroutine test_multipole_hessian
+
+subroutine test_multipole_potential(error)
+   !***********************************
+   !* Compare the derivative of the multipole potentials at fixed moments
+   !* against finite differences of the potentials.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iat, ic
+   type(structure_type) :: mol, displ
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   type(potential_type) :: potr, potl
+   real(wp), allocatable :: dvat(:, :, :), dvdp(:, :, :, :), dvqp(:, :, :, :)
+   real(wp), allocatable :: nvat(:, :, :), nvdp(:, :, :, :), nvqp(:, :, :, :)
+   real(wp), parameter :: step = 1.0e-4_wp
+
+   call get_structure(mol, "MB16-43", "06")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call set_moments(wfn)
+   call new_potential(potr, mol, calc%bas, 1)
+   call new_potential(potl, mol, calc%bas, 1)
+
+   allocate(dvat(mol%nat, 3, mol%nat), dvdp(3, mol%nat, 3, mol%nat), &
+      & dvqp(6, mol%nat, 3, mol%nat), nvat(mol%nat, 3, mol%nat), &
+      & nvdp(3, mol%nat, 3, mol%nat), nvqp(6, mol%nat, 3, mol%nat))
+   call get_multipole_potential_derivative(calc%coulomb%aes2, mol, wfn%qat(:, 1), &
+      & wfn%dpat(:, :, 1), wfn%qpat(:, :, 1), dvat, dvdp, dvqp)
+
+   displ = mol
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         call get_potential(displ, potr)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) - step
+         call get_potential(displ, potl)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat)
+         nvat(:, ic, iat) = (potr%vat(:, 1) - potl%vat(:, 1)) / (2*step)
+         nvdp(:, :, ic, iat) = (potr%vdp(:, :, 1) - potl%vdp(:, :, 1)) / (2*step)
+         nvqp(:, :, ic, iat) = (potr%vqp(:, :, 1) - potl%vqp(:, :, 1)) / (2*step)
+      end do
+   end do
+
+   if (any(abs(dvat - nvat) > thr) .or. any(abs(dvdp - nvdp) > thr) &
+      & .or. any(abs(dvqp - nvqp) > thr)) then
+      call test_failed(error, "Potential derivative does not match finite differences")
+      print "(a, 3es12.4)", "max. deviation:", maxval(abs(dvat - nvat)), &
+         & maxval(abs(dvdp - nvdp)), maxval(abs(dvqp - nvqp))
+      print "(a, 3es12.4)", "max. element:  ", maxval(abs(nvat)), &
+         & maxval(abs(nvdp)), maxval(abs(nvqp))
+   end if
+
+contains
+
+   subroutine get_potential(geo, pot)
+      type(structure_type), intent(in) :: geo
+      type(potential_type), intent(inout) :: pot
+
+      type(container_cache) :: cache
+
+      call pot%reset
+      call calc%coulomb%aes2%update(geo, cache)
+      call calc%coulomb%aes2%get_potential(geo, cache, wfn, pot)
+   end subroutine get_potential
+
+end subroutine test_multipole_potential
+
+subroutine test_hessian_gen(error, mol, calc, etemp)
+   !***********************************
+   !* Compare the analytic Hessian against finite differences of the
+   !* gradient of fully converged single point calculations.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+   !> Electronic temperature
+   real(wp), intent(in) :: etemp
+
+   type(context_type) :: ctx
+   type(wavefunction_type) :: wfn0
+   real(wp) :: energy
+   real(wp), allocatable :: hessian(:, :), numhess(:, :)
+   real(wp), parameter :: thr_scf = 1.0e-6_wp
+
+   call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, etemp)
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
+
+   allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
+   call xtb_hessian(ctx, mol, calc, wfn0, hessian)
+   if (ctx%failed()) then
+      call ctx%get_error(error)
+      return
+   end if
+
+   call get_numerical_hessian(mol, get_gradient, numhess)
+
+   if (any(abs(hessian - numhess) > thr_scf)) then
+      call test_failed(error, "Hessian does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(hessian - numhess))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(numhess))
+   end if
+
+contains
+
+   subroutine get_gradient(displ, gradient)
+      type(structure_type), intent(in) :: displ
+      real(wp), intent(out) :: gradient(:, :)
+
+      type(wavefunction_type) :: wfn
+      real(wp) :: sigma(3, 3)
+
+      wfn = wfn0
+      call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, gradient, sigma, &
+         & verbosity=0)
+   end subroutine get_gradient
+
+end subroutine test_hessian_gen
+
+subroutine test_hessian_gfn1(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn1
+
+subroutine test_hessian_gfn2(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "MB16-43", "02")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn2
+
+subroutine test_hessian_gfn1_smearing(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "MB16-43", "03")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, 0.02_wp)
+
+end subroutine test_hessian_gfn1_smearing
 
 end module test_hessian

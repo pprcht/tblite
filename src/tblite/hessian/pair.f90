@@ -20,10 +20,12 @@
 !> Cartesian second derivatives of pairwise radial energy contributions
 module tblite_hessian_pair
    use mctc_env, only : wp
+   use tblite_blas, only : gemm
    implicit none
    private
 
    public :: get_pair_block, add_pair_hessian, add_hessian_block
+   public :: add_ncoord_hessian
 
 contains
 
@@ -94,5 +96,43 @@ pure subroutine add_hessian_block(hessian, iat, jat, block)
    jj = 3*(jat - 1)
    hessian(ii+1:ii+3, jj+1:jj+3) = hessian(ii+1:ii+3, jj+1:jj+3) + block
 end subroutine add_hessian_block
+
+subroutine add_ncoord_hessian(hessian, dcndr, dEdcndr, dEdcndcn)
+   !***********************************
+   !* Add the part of the Hessian of an energy depending on the positions
+   !* via the coordination numbers, given the mixed second derivative
+   !* dEdcndr(3*(iat-1)+ic, kat) w.r.t. a position and the coordination
+   !* number of kat, and optionally the second derivative w.r.t. two
+   !* coordination numbers. The contribution of the second derivative of the
+   !* coordination numbers themselves is not included.
+   !***********************************
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), intent(inout) :: hessian(:, :)
+   !> Derivative of the coordination numbers w.r.t. the atomic positions
+   real(wp), intent(in) :: dcndr(:, :, :)
+   !> Derivative of the energy w.r.t. position and coordination number
+   real(wp), intent(in) :: dEdcndr(:, :)
+   !> Derivative of the energy w.r.t. two coordination numbers
+   real(wp), intent(in), optional :: dEdcndcn(:, :)
+
+   integer :: iat, kat, nat
+   real(wp), allocatable :: dr(:, :), tmp(:, :)
+
+   nat = size(dcndr, 2)
+   allocate(dr(3*nat, nat))
+   do kat = 1, nat
+      do iat = 1, nat
+         dr(3*(iat - 1)+1:3*iat, kat) = dcndr(:, iat, kat)
+      end do
+   end do
+
+   call gemm(dEdcndr, dr, hessian, transb="t", beta=1.0_wp)
+   call gemm(dr, dEdcndr, hessian, transb="t", beta=1.0_wp)
+   if (present(dEdcndcn)) then
+      allocate(tmp(3*nat, nat))
+      call gemm(dr, dEdcndcn, tmp)
+      call gemm(tmp, dr, hessian, transb="t", beta=1.0_wp)
+   end if
+end subroutine add_ncoord_hessian
 
 end module tblite_hessian_pair

@@ -14,8 +14,12 @@
 # You should have received a copy of the GNU Lesser General Public License
 
 srcs += files(
+  'coulomb.f90',
   'dispersion.f90',
   'halogen.f90',
+  'hamiltonian.f90',
+  'multipole.f90',
   'pair.f90',
   'repulsion.f90',
+  'xtb.f90',
 )
