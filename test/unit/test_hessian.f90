@@ -18,7 +18,7 @@ module test_hessian
    use mctc_env, only : wp
    use mctc_env_testing, only : new_unittest, unittest_type, error_type, check, &
       & test_failed
-   use mctc_io, only : structure_type
+   use mctc_io, only : structure_type, new
    use mstore, only : get_structure
    use tblite_container, only : container_cache
    use tblite_context_type, only : context_type
@@ -73,7 +73,11 @@ subroutine collect_hessian(testsuite)
       new_unittest("multipole-potential", test_multipole_potential), &
       new_unittest("gfn1-hessian", test_hessian_gfn1), &
       new_unittest("gfn2-hessian", test_hessian_gfn2), &
-      new_unittest("gfn1-hessian-smearing", test_hessian_gfn1_smearing) &
+      new_unittest("gfn1-hessian-smearing", test_hessian_gfn1_smearing), &
+      new_unittest("gfn1-hessian-halogen", test_hessian_gfn1_halogen), &
+      new_unittest("gfn1-dipgrad", test_dipgrad_gfn1), &
+      new_unittest("gfn2-dipgrad", test_dipgrad_gfn2), &
+      new_unittest("unsupported-spin", test_unsupported_spin, should_fail=.true.) &
       ]
 
 end subroutine collect_hessian
@@ -564,5 +568,136 @@ subroutine test_hessian_gfn1_smearing(error)
    call test_hessian_gen(error, mol, calc, 0.02_wp)
 
 end subroutine test_hessian_gfn1_smearing
+
+subroutine test_hessian_gfn1_halogen(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   character(len=*), parameter :: sym(6) = [character(len=4) :: &
+      & "Br", "Br", "O", "C", "H", "H"]
+   real(wp), parameter :: xyz(3, 6) = reshape([&
+      & -1.78533374700000_wp, -3.12608299900000_wp,  0.00000000000000_wp, &
+      &  0.00000000000000_wp,  0.81604226400000_wp,  0.00000000000000_wp, &
+      &  2.65828699900000_wp,  5.29707580600000_wp,  0.00000000000000_wp, &
+      &  4.88597158600000_wp,  4.86116137300000_wp,  0.00000000000000_wp, &
+      &  5.61550975300000_wp,  2.90822215900000_wp,  0.00000000000000_wp, &
+      &  6.28907612600000_wp,  6.39963643500000_wp,  0.00000000000000_wp], &
+      & shape(xyz))
+
+   call new(mol, sym, xyz)
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn1_halogen
+
+subroutine test_dipgrad_gen(error, mol, calc)
+   !***********************************
+   !* Compare the analytic derivative of the dipole moment against finite
+   !* differences of the dipole moment of converged single point calculations.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+
+   integer :: iat, ic
+   type(context_type) :: ctx
+   type(structure_type) :: displ
+   type(wavefunction_type) :: wfn0, wfn
+   real(wp) :: energy, dipr(3), dipl(3)
+   real(wp), allocatable :: hessian(:, :), dipgrad(:, :, :), numdip(:, :, :)
+   real(wp), parameter :: step = 1.0e-4_wp, thr_scf = 1.0e-5_wp
+
+   call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
+
+   allocate(hessian(3*mol%nat, 3*mol%nat), dipgrad(3, 3, mol%nat), numdip(3, 3, mol%nat))
+   call xtb_hessian(ctx, mol, calc, wfn0, hessian, dipgrad)
+   if (ctx%failed()) then
+      call ctx%get_error(error)
+      return
+   end if
+
+   displ = mol
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         wfn = wfn0
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
+         dipr(:) = matmul(displ%xyz, wfn%qat(:, 1)) + sum(wfn%dpat(:, :, 1), 2)
+         wfn = wfn0
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) - step
+         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
+         dipl(:) = matmul(displ%xyz, wfn%qat(:, 1)) + sum(wfn%dpat(:, :, 1), 2)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat)
+         numdip(:, ic, iat) = (dipr - dipl) / (2*step)
+      end do
+   end do
+
+   if (any(abs(dipgrad - numdip) > thr_scf)) then
+      call test_failed(error, "Dipole derivative does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(dipgrad - numdip))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(numdip))
+   end if
+
+end subroutine test_dipgrad_gen
+
+subroutine test_dipgrad_gfn1(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_dipgrad_gen(error, mol, calc)
+
+end subroutine test_dipgrad_gfn1
+
+subroutine test_dipgrad_gfn2(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "MB16-43", "02")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_dipgrad_gen(error, mol, calc)
+
+end subroutine test_dipgrad_gfn2
+
+subroutine test_unsupported_spin(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(context_type) :: ctx
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   real(wp), allocatable :: hessian(:, :)
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 2, kt)
+
+   allocate(hessian(3*mol%nat, 3*mol%nat))
+   call xtb_hessian(ctx, mol, calc, wfn, hessian)
+   if (ctx%failed()) call ctx%get_error(error)
+
+end subroutine test_unsupported_spin
 
 end module test_hessian
