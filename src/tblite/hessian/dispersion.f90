@@ -212,7 +212,7 @@ subroutine get_damped_radial(disp, izp, jzp, r2, fsw, df)
    df = 2*sqrt(r2)*(dswdr2*f + sw*dfdr2)
 end subroutine get_damped_radial
 
-subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
+subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error, dqat)
    !***********************************
    !* Derivative of the atomic potential of the self-consistent dispersion
    !* w.r.t. the atomic positions at fixed charges, dvat(iat, ic, kat) for
@@ -220,6 +220,8 @@ subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
    !* v_i = -sum_j dC6_ij/dq_i F(r_ij) and depends on the positions via the
    !* radial function and via the coordination numbers in the reference
    !* weights, gw = w(CN) zeta(q).
+   !* With first-order charges dqat, the derivative of this quantity w.r.t.
+   !* the charges contracted with dqat is returned instead.
    !* Interactions of an atom with its own periodic images are not included.
    !***********************************
    !> Instance of the dispersion container
@@ -232,13 +234,15 @@ subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
    real(wp), intent(out) :: dvat(:, :, :)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> First-order atomic charges
+   real(wp), intent(in), optional :: dqat(:)
 
    integer :: nat, mref, iat, jat, izp, jzp, itr, iref, jref
    real(wp) :: vec(3), r2, cutoff2, fsw, df, dfvec(3), refc6
-   real(wp) :: dc6dq, d2c6dqdcni, d2c6dqdcnj
+   real(wp) :: dc6dq, d2c6dqdcni, d2c6dqdcnj, c, u, g, qi, qj
    real(wp), allocatable :: cn(:), dcndr(:, :, :), dcndL(:, :, :), lattr(:, :)
-   real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwdq(:, :, :), gwdcndq(:, :)
-   real(wp), allocatable :: dvdcn(:, :)
+   real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwdq(:, :, :)
+   real(wp), allocatable :: gwdcndq(:, :), gwd2q(:, :), gwdcnd2q(:, :), dvdcn(:, :)
 
    nat = mol%nat
    dvat(:, :, :) = 0.0_wp
@@ -254,14 +258,27 @@ subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
          mref = maxval(model%ref)
          allocate(gwvec(mref, nat, model%ncoup), gwdcn(mref, nat, model%ncoup), &
             & gwdq(mref, nat, model%ncoup))
-         allocate(gwdcndq(mref, nat), dvdcn(nat, nat), source=0.0_wp)
+         allocate(gwdcndq(mref, nat), gwd2q(mref, nat), gwdcnd2q(mref, nat), &
+            & dvdcn(nat, nat), source=0.0_wp)
          call model%weight_references(mol, cn, qat, gwvec, gwdcn, gwdq)
 
-         !>-- the weights factorize, hence the mixed derivative is the product
-         !>   of the logarithmic derivatives
-         where(abs(gwvec(:, :, 1)) > tiny(1.0_wp))
-            gwdcndq = gwdcn(:, :, 1) * gwdq(:, :, 1) / gwvec(:, :, 1)
-         end where
+         !>-- the weights factorize, gw = w(CN) zeta(q). With the logarithmic
+         !>   derivative g = zeta'/zeta the mixed derivative is g dw/dCN and
+         !>   the second charge derivative follows from g' = g (c*qref/u**2 - 2/u)
+         do iat = 1, nat
+            izp = mol%id(iat)
+            c = model%eta(izp) * model%gc
+            u = qat(iat) + model%zeff(izp)
+            do iref = 1, model%ref(izp)
+               if (abs(gwvec(iref, iat, 1)) < tiny(1.0_wp)) cycle
+               g = gwdq(iref, iat, 1) / gwvec(iref, iat, 1)
+               gwdcndq(iref, iat) = gwdcn(iref, iat, 1) * g
+               if (abs(u) < 1.0e-12_wp) cycle
+               g = g * (g + c*(model%q(iref, izp) + model%zeff(izp))/u**2 - 2.0_wp/u)
+               gwd2q(iref, iat) = gwvec(iref, iat, 1) * g
+               gwdcnd2q(iref, iat) = gwdcn(iref, iat, 1) * g
+            end do
+         end do
 
          cutoff2 = disp%cutoff%disp2**2
          call get_lattice_points(mol%periodic, mol%lattice, disp%cutoff%disp2, lattr)
@@ -276,6 +293,20 @@ subroutine get_dispersion_potential_derivative(disp, mol, qat, dvat, error)
                do iref = 1, model%ref(izp)
                   do jref = 1, model%ref(jzp)
                      refc6 = model%c6(iref, jref, izp, jzp)
+                     if (present(dqat)) then
+                        qi = dqat(iat)
+                        qj = dqat(jat)
+                        dc6dq = dc6dq + refc6 &
+                           & * (gwd2q(iref, iat)*gwvec(jref, jat, 1)*qi &
+                           & + gwdq(iref, iat, 1)*gwdq(jref, jat, 1)*qj)
+                        d2c6dqdcni = d2c6dqdcni + refc6 &
+                           & * (gwdcnd2q(iref, iat)*gwvec(jref, jat, 1)*qi &
+                           & + gwdcndq(iref, iat)*gwdq(jref, jat, 1)*qj)
+                        d2c6dqdcnj = d2c6dqdcnj + refc6 &
+                           & * (gwd2q(iref, iat)*gwdcn(jref, jat, 1)*qi &
+                           & + gwdq(iref, iat, 1)*gwdcndq(jref, jat)*qj)
+                        cycle
+                     end if
                      dc6dq = dc6dq + gwdq(iref, iat, 1)*gwvec(jref, jat, 1)*refc6
                      d2c6dqdcni = d2c6dqdcni + gwdcndq(iref, iat)*gwvec(jref, jat, 1)*refc6
                      d2c6dqdcnj = d2c6dqdcnj + gwdq(iref, iat, 1)*gwdcn(jref, jat, 1)*refc6

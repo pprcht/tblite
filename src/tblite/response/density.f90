@@ -26,7 +26,8 @@ module tblite_response_density
    implicit none
    private
 
-   public :: density_response, wdensity_response
+   public :: density_response, wdensity_response, density_response_derivative
+   public :: has_integer_occupation
 
    !> Occupation below which an orbital is treated as empty
    real(wp), parameter :: occtol = 1.0e-12_wp
@@ -147,6 +148,101 @@ subroutine wdensity_response(wfn, dh, dw, ds)
    call backtransform_response(wfn, nact, wmo, dw)
 
 end subroutine wdensity_response
+
+subroutine density_response_derivative(wfn, dhs, dh, ds, dp)
+   !***********************************
+   !* Derivative of the density response to the perturbations dh and ds
+   !* w.r.t. the converged state, which changes due to a perturbation dhs of
+   !* the Hamiltonian with unchanged overlap. With Hs = C^T dhs C the
+   !* orbitals rotate by U_pq = Hs_pq/(e_q - e_p) and the orbital energies
+   !* shift by Hs_pp. Only valid for integer occupation numbers, rotations
+   !* between degenerate orbitals are not included.
+   !***********************************
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Perturbation of the Hamiltonian changing the state
+   real(wp), intent(in) :: dhs(:, :)
+   !> Perturbation of the Hamiltonian in the atomic orbital basis
+   real(wp), intent(in) :: dh(:, :)
+   !> Perturbation of the overlap in the atomic orbital basis
+   real(wp), intent(in) :: ds(:, :)
+   !> Derivative of the response of the density matrix
+   real(wp), intent(out) :: dp(:, :)
+
+   integer :: nao, p, q
+   real(wp) :: de
+   real(wp), allocatable :: hmo(:, :), smo(:, :), hsmo(:, :), tmp(:, :), f(:), fe(:)
+   real(wp), allocatable :: umat(:, :), w0(:, :), dw0(:, :), hcom(:, :), scom(:, :)
+
+   nao = size(dh, 1)
+   allocate(hmo(nao, nao), smo(nao, nao), hsmo(nao, nao), tmp(nao, nao), umat(nao, nao), &
+      & w0(nao, nao), dw0(nao, nao), hcom(nao, nao), scom(nao, nao))
+   call gemm(wfn%coeff(:, :, 1), dh, tmp, transa="t")
+   call gemm(tmp, wfn%coeff(:, :, 1), hmo)
+   call gemm(wfn%coeff(:, :, 1), ds, tmp, transa="t")
+   call gemm(tmp, wfn%coeff(:, :, 1), smo)
+   call gemm(wfn%coeff(:, :, 1), dhs, tmp, transa="t")
+   call gemm(tmp, wfn%coeff(:, :, 1), hsmo)
+
+   !>-- half of the total occupation, the factor two is restored at the end
+   f = 0.5_wp * (wfn%focc(:, 1) + wfn%focc(:, 2))
+   fe = f * wfn%emo(:, 1)
+
+   do q = 1, nao
+      do p = 1, nao
+         de = wfn%emo(p, 1) - wfn%emo(q, 1)
+         if (p == q) then
+            umat(p, q) = 0.0_wp
+            w0(p, q) = -f(p) * smo(p, q)
+         else if (abs(de) < degtol) then
+            umat(p, q) = 0.0_wp
+            w0(p, q) = 0.0_wp
+         else
+            umat(p, q) = -hsmo(p, q) / de
+            w0(p, q) = ((f(p) - f(q)) * hmo(p, q) - (fe(p) - fe(q)) * smo(p, q)) / de
+         end if
+      end do
+   end do
+
+   !>-- commutators of the perturbations with the orbital rotation
+   call gemm(hmo, umat, hcom)
+   call gemm(umat, hmo, hcom, alpha=-1.0_wp, beta=1.0_wp)
+   call gemm(smo, umat, scom)
+   call gemm(umat, smo, scom, alpha=-1.0_wp, beta=1.0_wp)
+
+   do q = 1, nao
+      do p = 1, nao
+         de = wfn%emo(p, 1) - wfn%emo(q, 1)
+         if (p == q) then
+            dw0(p, q) = -f(p) * scom(p, q)
+         else if (abs(de) < degtol) then
+            dw0(p, q) = 0.0_wp
+         else
+            dw0(p, q) = ((f(p) - f(q)) * hcom(p, q) &
+               & - (f(p) * hsmo(p, p) - f(q) * hsmo(q, q)) * smo(p, q) &
+               & - (fe(p) - fe(q)) * scom(p, q) &
+               & - w0(p, q) * (hsmo(p, p) - hsmo(q, q))) / de
+         end if
+      end do
+   end do
+
+   call gemm(umat, w0, dw0, beta=1.0_wp)
+   call gemm(w0, umat, dw0, alpha=-1.0_wp, beta=1.0_wp)
+   call gemm(wfn%coeff(:, :, 1), dw0, tmp)
+   call gemm(tmp, wfn%coeff(:, :, 1), dp, transb="t", alpha=2.0_wp)
+end subroutine density_response_derivative
+
+pure function has_integer_occupation(wfn) result(integer_occupation)
+   !***********************************
+   !* Whether all orbitals are either occupied or empty in both spin channels.
+   !***********************************
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> All occupation numbers are zero or one
+   logical :: integer_occupation
+
+   integer_occupation = all(abs(wfn%focc(:, 1:2) * (1.0_wp - wfn%focc(:, 1:2))) < 1.0e-8_wp)
+end function has_integer_occupation
 
 subroutine transform_perturbation(wfn, f, dh, ds, nact, hmo, smo, dep)
    !***********************************

@@ -20,66 +20,31 @@
 !> Analytic second derivatives of the energy of a self-consistent xTB
 !> calculation w.r.t. the atomic positions
 module tblite_hessian_xtb
-   use mctc_env, only : wp, error_type, fatal_error
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
-   use tblite_adjlist, only : adjacency_list, new_adjacency_list
-   use tblite_basis_type, only : get_cutoff
    use tblite_blas, only : gemv, gemm
    use tblite_container, only : container_cache
    use tblite_context, only : context_type
-   use tblite_cutoff, only : get_lattice_points
-   use tblite_hessian_coulomb, only : get_coulomb_hessian, get_potential_derivative
-   use tblite_hessian_dispersion, only : get_dispersion_hessian, &
-      & get_dispersion_potential_derivative
+   use tblite_hessian_coulomb, only : get_coulomb_hessian
+   use tblite_hessian_dispersion, only : get_dispersion_hessian
    use tblite_hessian_halogen, only : get_halogen_hessian
-   use tblite_hessian_hamiltonian, only : get_scaled_overlap, &
-      & get_hamiltonian_derivative, get_hamiltonian_hessian
-   use tblite_hessian_multipole, only : get_multipole_hessian, &
-      & get_multipole_potential_derivative, get_multipole_band_hessian
+   use tblite_hessian_hamiltonian, only : get_hamiltonian_hessian
+   use tblite_hessian_multipole, only : get_multipole_hessian, get_multipole_band_hessian
+   use tblite_hessian_reference, only : reference_data, new_reference_data, &
+      & get_nuclear_perturbation, check_hessian_support
    use tblite_hessian_repulsion, only : get_repulsion_hessian
-   use tblite_integral_type, only : integral_type, new_integral
-   use tblite_response_integral, only : get_overlap_derivative, get_multipole_derivative
-   use tblite_response_kernel, only : has_dispersion_kernel
    use tblite_response_nuclear, only : xtb_nuclear_response
    use tblite_response_polarizability, only : check_response_support
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
-   use tblite_scf_potential, only : add_pot_to_h1
-   use tblite_wavefunction_mulliken, only : get_mulliken_shell_charges, &
-      & get_mulliken_atomic_multipoles
+   use tblite_wavefunction_mulliken, only : get_mulliken_atomic_multipoles
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
-   use tblite_xtb_h0, only : get_selfenergy, get_hamiltonian, get_hamiltonian_gradient
+   use tblite_xtb_h0, only : get_hamiltonian_gradient
    implicit none
    private
 
    public :: xtb_hessian
-
-   !> Quantities of the unperturbed system shared by all displacements
-   type :: reference_data
-      !> Realspace cutoff of the integrals
-      real(wp) :: cutoff
-      !> Lattice points within the cutoff
-      real(wp), allocatable :: lattr(:, :)
-      !> Neighbor list
-      type(adjacency_list) :: list
-      !> Derivative of the coordination numbers w.r.t. the atomic positions
-      real(wp), allocatable :: dcndr(:, :, :)
-      !> Self-energies and their derivative w.r.t. the coordination number
-      real(wp), allocatable :: selfenergy(:), dsedcn(:)
-      !> Integrals
-      type(integral_type) :: ints
-      !> Scaled overlap matrix of the core Hamiltonian
-      real(wp), allocatable :: bmat(:, :)
-      !> Converged potential and a vanishing one
-      type(potential_type) :: pot, pot_zero
-      !> Derivative of the shell-resolved potential at fixed charges and moments
-      real(wp), allocatable :: dvshdr(:, :)
-      !> Derivative of the multipole potentials at fixed charges and moments
-      real(wp), allocatable :: dvdp(:, :, :, :), dvqp(:, :, :, :)
-      !> Gradient of the core Hamiltonian contracted with the converged density
-      real(wp), allocatable :: gradient(:, :), dEdcn(:)
-   end type reference_data
 
 contains
 
@@ -112,11 +77,8 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
 
    integer :: nat, nao, nsh, iat
    logical :: multipoles, dipole
-   real(wp) :: sigma(3, 3)
-   real(wp), allocatable :: cn(:), dcndL(:, :, :), wmat(:, :), h1(:, :, :)
-   real(wp), allocatable :: dqshdr(:, :), dvat(:, :, :), zero(:, :, :), dmu(:, :, :)
+   real(wp), allocatable :: wmat(:, :), dqshdr(:, :), dmu(:, :, :)
    type(reference_data) :: ref
-   type(container_cache) :: ccache, dcache
    type(error_type), allocatable :: error, local_error
 
    nat = mol%nat
@@ -134,64 +96,12 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
       return
    end if
 
-   !>-- integrals and potential of the unperturbed system
-   ref%cutoff = get_cutoff(calc%bas)
-   call get_lattice_points(mol%periodic, mol%lattice, ref%cutoff, ref%lattr)
-   call new_adjacency_list(ref%list, mol, ref%lattr, ref%cutoff)
-
-   allocate(cn(nat), ref%dcndr(3, nat, nat), dcndL(3, 3, nat))
-   call calc%ncoord%get_cn(mol, cn, ref%dcndr, dcndL)
-   allocate(ref%selfenergy(nsh), ref%dsedcn(nsh))
-   call get_selfenergy(calc%h0, mol%id, calc%bas%ish_at, calc%bas%nsh_id, cn=cn, &
-      & selfenergy=ref%selfenergy, dsedcn=ref%dsedcn)
-
-   call new_integral(ref%ints, nao)
-   call get_hamiltonian(mol, ref%lattr, ref%list, calc%bas, calc%h0, ref%selfenergy, &
-      & ref%ints%overlap, ref%ints%dipole, ref%ints%quadrupole, ref%ints%hamiltonian)
-   allocate(ref%bmat(nao, nao))
-   call get_scaled_overlap(mol, calc%bas, calc%h0, ref%ints%overlap, ref%cutoff, ref%bmat)
-
-   call calc%coulomb%update(mol, ccache)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, dcache)
-
-   !>-- folding the potential is only required to expand it to the orbitals
-   call new_potential(ref%pot, mol, calc%bas, 1)
-   call ref%pot%reset
-   call calc%coulomb%get_potential(mol, ccache, wfn, ref%pot)
-   if (has_dispersion_kernel(calc)) then
-      call calc%dispersion%get_potential(mol, dcache, wfn, ref%pot)
+   call new_reference_data(ref, mol, calc, wfn, error)
+   if (allocated(error)) then
+      call ctx%set_error(error)
+      return
    end if
-   allocate(h1(nao, nao, 1))
-   call add_pot_to_h1(calc%bas, ref%ints, ref%pot, h1)
-   call new_potential(ref%pot_zero, mol, calc%bas, 1)
-   call ref%pot_zero%reset
-
-   !>-- derivative of the potential at fixed charges and multipole moments,
-   !>   the atom-resolved parts are added to the shell-resolved potential
-   allocate(ref%dvshdr(nsh, 3*nat), dqshdr(nsh, 3*nat), dvat(nat, 3, nat))
-   call get_potential_derivative(mol, calc, ccache, wfn, ref%dvshdr)
-   allocate(ref%dvdp(3, nat, 3, nat), ref%dvqp(6, nat, 3, nat), source=0.0_wp)
-   if (multipoles) then
-      call get_multipole_potential_derivative(calc%coulomb%aes2, mol, wfn%qat(:, 1), &
-         & wfn%dpat(:, :, 1), wfn%qpat(:, :, 1), dvat, ref%dvdp, ref%dvqp)
-      call add_atomic_potential_derivative(calc, dvat, ref%dvshdr)
-   end if
-   if (has_dispersion_kernel(calc)) then
-      call get_dispersion_potential_derivative(calc%dispersion, mol, wfn%qat(:, 1), &
-         & dvat, error)
-      if (allocated(error)) then
-         call ctx%set_error(error)
-         return
-      end if
-      call add_atomic_potential_derivative(calc, dvat, ref%dvshdr)
-   end if
-
-   !>-- contribution of the core Hamiltonian to the gradient, which is
-   !>   contained in the contraction with the first-order potential
-   allocate(ref%gradient(3, nat), ref%dEdcn(nat), zero(nao, nao, 1), source=0.0_wp)
-   call get_hamiltonian_gradient(mol, ref%lattr, ref%list, calc%bas, calc%h0, &
-      & ref%selfenergy, ref%dsedcn, ref%pot_zero, wfn%density, zero, ref%dEdcn, &
-      & ref%gradient, sigma)
+   allocate(dqshdr(nsh, 3*nat))
 
    !>-- response part, one coupled-perturbed solution per coordinate
    allocate(dmu(3, 3, nat), source=0.0_wp)
@@ -277,11 +187,11 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   integer :: nat, nao, nsh, ic, idx, iao, jao
+   integer :: nat, nao, nsh, ic
    logical :: multipoles
    real(wp) :: sigma(3, 3)
-   real(wp), allocatable :: ds(:, :, :), dh0(:, :, :), dp(:, :, :), dw(:, :, :)
-   real(wp), allocatable :: zero(:, :, :), fock0(:, :), dvao(:), n0sh(:)
+   real(wp), allocatable :: ds(:, :, :), fock0(:, :, :), dp(:, :, :), dw(:, :, :)
+   real(wp), allocatable :: zero(:, :, :)
    real(wp), allocatable :: ddpat(:, :, :), dqpat(:, :, :), dpat(:, :, :)
    real(wp), allocatable :: grad(:, :), dEdcn(:)
    type(container_cache) :: ccache, dcache
@@ -299,54 +209,24 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
    call new_potential(pot_r, mol, calc%bas, 1)
    call new_wavefunction(wfn_r, nat, nsh, nao, 1, wfn%kt)
    call new_wavefunction(wfn_m, nat, nsh, nao, 1, wfn%kt)
-   allocate(ds(nao, nao, 3), dh0(nao, nao, 3), dp(nao, nao, 1), dw(nao, nao, 1))
-   allocate(grad(3, nat), dEdcn(nat), dvao(nao), fock0(nao, nao), dpat(3, nat, 1))
-   allocate(zero(nao, nao, 1), n0sh(nsh), ddpat(3, nat, 3), dqpat(6, nat, 3), &
-      & source=0.0_wp)
+   allocate(ds(nao, nao, 3), fock0(nao, nao, 3), dp(nao, nao, 1), dw(nao, nao, 1))
+   allocate(grad(3, nat), dEdcn(nat), dpat(3, nat, 1), ddpat(3, nat, 3), dqpat(6, nat, 3))
+   allocate(zero(nao, nao, 1), source=0.0_wp)
 
-   call get_overlap_derivative(mol, calc%bas, ref%lattr, ref%cutoff, iat, ds)
-   call get_hamiltonian_derivative(mol, calc%bas, calc%h0, ref%bmat, ref%selfenergy, &
-      & ref%dsedcn, ref%dcndr, ref%lattr, ref%cutoff, iat, dh0)
-   !>-- the multipole potentials vanish if the moments do not enter the
-   !>   Hamiltonian, then only the derivative of the atomic dipoles is used
-   if (multipoles .or. dipole) then
-      call get_multipole_derivative(mol, calc%bas, ref%lattr, ref%cutoff, iat, &
-         & wfn%density(:, :, 1), ref%pot%vdp(:, :, 1), ref%pot%vqp(:, :, 1), dh0, &
-         & ddpat, dqpat)
-   end if
+   call get_nuclear_perturbation(mol, calc, wfn, ref, iat, dipole, ds, fock0, dqshdr, &
+      & ddpat, dqpat)
 
    do ic = 1, 3
-      idx = 3*(iat - 1) + ic
-
-      !>-- derivative of the Hamiltonian at fixed charges and moments, the
-      !>   potential enters the Hamiltonian as -1/2 (v_m + v_n) S_mn
-      do iao = 1, nao
-         dvao(iao) = ref%dvshdr(calc%bas%ao2sh(iao), idx)
-      end do
-      do iao = 1, nao
-         do jao = 1, nao
-            fock0(jao, iao) = dh0(jao, iao, ic) &
-               & - 0.5_wp*(ref%pot%vao(jao, 1) + ref%pot%vao(iao, 1))*ds(jao, iao, ic) &
-               & - 0.5_wp*(dvao(jao) + dvao(iao))*ref%ints%overlap(jao, iao)
-         end do
-      end do
-      if (multipoles) then
-         call add_multipole_fock(calc, ref%ints, ref%dvdp(:, :, ic, iat), &
-            & ref%dvqp(:, :, ic, iat), fock0)
-      end if
-
       !>-- derivative of the charges and moments at fixed density
-      call get_mulliken_shell_charges(calc%bas, ds(:, :, ic), wfn%density, n0sh, &
-         & wfn_m%qsh)
+      wfn_m%qsh(:, 1) = dqshdr(:, ic)
       call get_qat_from_qsh(calc%bas, wfn_m%qsh, wfn_m%qat)
       if (multipoles) then
          wfn_m%dpat(:, :, 1) = ddpat(:, :, ic)
          wfn_m%qpat(:, :, 1) = dqpat(:, :, ic)
       end if
-      dqshdr(:, ic) = wfn_m%qsh(:, 1)
 
       call xtb_nuclear_response(mol, calc, wfn, ref%ints, ccache, dcache, ds(:, :, ic), &
-         & fock0, wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error)
+         & fock0(:, :, ic), wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error)
       if (allocated(error)) return
 
       !>-- first-order density with the unperturbed potential and
@@ -375,85 +255,6 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
       end if
    end do
 end subroutine get_response_columns
-
-subroutine check_hessian_support(calc, error)
-   !***********************************
-   !* Reject Hamiltonians for which second derivatives are not implemented.
-   !***********************************
-   !> Single-point calculator
-   type(xtb_calculator), intent(in) :: calc
-   !> Error handling
-   type(error_type), allocatable, intent(out) :: error
-
-   if (calc%h0%do_diat_scale) then
-      call fatal_error(error, "Analytic Hessian is not available with diatomic scaling")
-      return
-   end if
-   if (.not.allocated(calc%ncoord)) then
-      call fatal_error(error, "Analytic Hessian requires a coordination number")
-      return
-   end if
-end subroutine check_hessian_support
-
-subroutine add_atomic_potential_derivative(calc, dvat, dvshdr)
-   !***********************************
-   !* Add the derivative of an atom-resolved potential to the one of the
-   !* shell-resolved potential.
-   !***********************************
-   !> Single-point calculator
-   type(xtb_calculator), intent(in) :: calc
-   !> Derivative of the atom-resolved potential
-   real(wp), intent(in) :: dvat(:, :, :)
-   !> Derivative of the shell-resolved potential
-   real(wp), intent(inout) :: dvshdr(:, :)
-
-   integer :: iat, ish, kat, ic
-
-   do kat = 1, size(dvat, 3)
-      do ic = 1, 3
-         do iat = 1, size(dvat, 1)
-            do ish = 1, calc%bas%nsh_at(iat)
-               dvshdr(calc%bas%ish_at(iat)+ish, 3*(kat-1)+ic) = &
-                  & dvshdr(calc%bas%ish_at(iat)+ish, 3*(kat-1)+ic) + dvat(iat, ic, kat)
-            end do
-         end do
-      end do
-   end do
-end subroutine add_atomic_potential_derivative
-
-subroutine add_multipole_fock(calc, ints, dvdp, dvqp, fock)
-   !***********************************
-   !* Add the derivative of the Hamiltonian due to the derivative of the
-   !* multipole potentials at unchanged integrals.
-   !***********************************
-   !> Single-point calculator
-   type(xtb_calculator), intent(in) :: calc
-   !> Integrals at the current geometry
-   type(integral_type), intent(in) :: ints
-   !> Derivative of the potential acting on the dipole moments
-   real(wp), intent(in) :: dvdp(:, :)
-   !> Derivative of the potential acting on the quadrupole moments
-   real(wp), intent(in) :: dvqp(:, :)
-   !> Derivative of the Hamiltonian
-   real(wp), intent(inout) :: fock(:, :)
-
-   integer :: iao, jao, iat, jat
-   real(wp) :: vij
-
-   do iao = 1, calc%bas%nao
-      iat = calc%bas%ao2at(iao)
-      do jao = 1, iao
-         jat = calc%bas%ao2at(jao)
-         vij = -0.5_wp*( &
-            & dot_product(ints%dipole(:, jao, iao), dvdp(:, iat)) &
-            & + dot_product(ints%dipole(:, iao, jao), dvdp(:, jat)) &
-            & + dot_product(ints%quadrupole(:, jao, iao), dvqp(:, iat)) &
-            & + dot_product(ints%quadrupole(:, iao, jao), dvqp(:, jat)))
-         fock(jao, iao) = fock(jao, iao) + vij
-         if (jao /= iao) fock(iao, jao) = fock(iao, jao) + vij
-      end do
-   end do
-end subroutine add_multipole_fock
 
 subroutine add_moment_gradient(wfn_r, dvdp, dvqp, gradient)
    !***********************************

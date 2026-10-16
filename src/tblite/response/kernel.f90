@@ -32,7 +32,8 @@ module tblite_response_kernel
    implicit none
    private
 
-   public :: get_kernel_potential, has_dispersion_kernel
+   public :: get_kernel_potential, get_kernel_potential_derivative
+   public :: has_dispersion_kernel
 
 contains
 
@@ -131,13 +132,79 @@ subroutine linearize_thirdorder(mol, calc, wfn, wfn_r, pot)
    end associate
 end subroutine linearize_thirdorder
 
+subroutine get_charge_weights(mol, calc, dcache, qat, ptr, gw, error)
+   !***********************************
+   !* Reference weights of the D4 model and their first three derivatives
+   !* w.r.t. the atomic charge, gw(:, :, 0:3). The weights are gw = w zeta(q)
+   !* with the logarithmic derivative g = zeta'/zeta, for which g' = g s and
+   !* g'' = g (s**2 + s') hold with s = c*qref/u**2 - 2/u, u = q + zeff and
+   !* c = eta*gc.
+   !***********************************
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+   !> Cache of the dispersion container
+   type(container_cache), intent(inout) :: dcache
+   !> Atomic partial charges
+   real(wp), intent(in) :: qat(:)
+   !> Dispersion cache
+   type(dispersion_cache), pointer, intent(out) :: ptr
+   !> Reference weights and their charge derivatives
+   real(wp), allocatable, intent(out) :: gw(:, :, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: mref, iat, izp, iref
+   real(wp) :: c, u, qref, g, s, ds
+   real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwdq(:, :, :)
+   real(wp), parameter :: small = 1.0e-12_wp
+
+   call view(dcache, ptr)
+   if (.not.associated(ptr)) then
+      call fatal_error(error, "Dispersion cache is not initialized")
+      return
+   end if
+
+   select type(disp => calc%dispersion)
+   type is (d4_dispersion)
+      select type(model => disp%model)
+      type is (d4_model)
+         mref = maxval(model%ref)
+         allocate(gwvec(mref, mol%nat, model%ncoup), gwdcn(mref, mol%nat, model%ncoup), &
+            & gwdq(mref, mol%nat, model%ncoup))
+         allocate(gw(mref, mol%nat, 0:3), source=0.0_wp)
+         call model%weight_references(mol, ptr%cn, qat, gwvec, gwdcn, gwdq)
+
+         gw(:, :, 0) = gwvec(:, :, 1)
+         gw(:, :, 1) = gwdq(:, :, 1)
+         do iat = 1, mol%nat
+            izp = mol%id(iat)
+            c = model%eta(izp) * model%gc
+            u = qat(iat) + model%zeff(izp)
+            if (abs(u) < small) cycle
+            do iref = 1, model%ref(izp)
+               if (abs(gw(iref, iat, 0)) < tiny(1.0_wp)) cycle
+               qref = model%q(iref, izp) + model%zeff(izp)
+               g = gw(iref, iat, 1) / gw(iref, iat, 0)
+               s = c*qref/u**2 - 2.0_wp/u
+               ds = -2*c*qref/u**3 + 2.0_wp/u**2
+               gw(iref, iat, 2) = gw(iref, iat, 0) * g * (g + s)
+               gw(iref, iat, 3) = gw(iref, iat, 0) * g * (g*g + 3*g*s + s*s + ds)
+            end do
+         end do
+      class default
+         call fatal_error(error, "Response kernel is only available for the D4 model")
+      end select
+   class default
+      call fatal_error(error, "Response kernel requires self-consistent D4 dispersion")
+   end select
+end subroutine get_charge_weights
+
 subroutine add_dispersion_kernel(mol, calc, dcache, wfn, wfn_r, pot, error)
    !***********************************
    !* Add the second charge derivative of the self-consistent D4 dispersion
    !* energy contracted with the response charges to the atomic potential.
-   !* The reference weights are gw = gwk*zeta(q), with the logarithmic charge
-   !* derivative g = dgw/dq / gw and dg/dq = g*(c*qref/u**2 - 2/u), where
-   !* u = q + zeff and c = eta*gc.
    !***********************************
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
@@ -154,68 +221,106 @@ subroutine add_dispersion_kernel(mol, calc, dcache, wfn, wfn_r, pot, error)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   integer :: mref, iat, jat, izp, jzp, iref, jref
-   real(wp) :: c, u, qref, g, dg, gw, ha, hb, w6
-   real(wp), allocatable :: gwvec(:, :, :), gwdcn(:, :, :), gwdq(:, :, :), gwd2q(:, :)
+   integer :: iat, jat, iref, jref
+   real(wp) :: ha, hb, w6
+   real(wp), allocatable :: gw(:, :, :)
    type(dispersion_cache), pointer :: ptr
-   real(wp), parameter :: small = 1.0e-12_wp
 
-   call view(dcache, ptr)
-   if (.not.associated(ptr)) then
-      call fatal_error(error, "Dispersion cache is not initialized")
-      return
+   call get_charge_weights(mol, calc, dcache, wfn%qat(:, 1), ptr, gw, error)
+   if (allocated(error)) return
+
+   !>-- the cached matrix holds the damped reference C6 of all pairs
+   do iat = 1, mol%nat
+      do jat = 1, mol%nat
+         ha = 0.0_wp
+         hb = 0.0_wp
+         do iref = 1, size(gw, 1)
+            do jref = 1, size(gw, 1)
+               w6 = ptr%dispmat(iref, iat, jref, jat)
+               ha = ha + gw(iref, iat, 2) * gw(jref, jat, 0) * w6
+               hb = hb + gw(iref, iat, 1) * gw(jref, jat, 1) * w6
+            end do
+         end do
+         pot%vat(iat, 1) = pot%vat(iat, 1) &
+            & + ha*wfn_r%qat(iat, 1) + hb*wfn_r%qat(jat, 1)
+      end do
+   end do
+end subroutine add_dispersion_kernel
+
+subroutine get_kernel_potential_derivative(mol, calc, dcache, wfn, wfn_s, wfn_r, pot, error)
+   !***********************************
+   !* Add the derivative of the kernel potential of the first-order moments
+   !* in wfn_r w.r.t. the converged state along the first-order moments in
+   !* wfn_s. The second-order electrostatics are bilinear and do not
+   !* contribute, the third derivatives of the onsite third-order and of the
+   !* self-consistent D4 dispersion energy remain.
+   !***********************************
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+   !> Cache of the dispersion container
+   type(container_cache), intent(inout) :: dcache
+   !> Converged wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order charges changing the converged state
+   type(wavefunction_type), intent(in) :: wfn_s
+   !> First-order charges generating the potential
+   type(wavefunction_type), intent(in) :: wfn_r
+   !> Response potential
+   type(potential_type), intent(inout) :: pot
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iat, jat, izp, ii, ish, iref, jref
+   real(wp) :: hub, dha, dhb, w6
+   real(wp), allocatable :: gw(:, :, :)
+   type(dispersion_cache), pointer :: ptr
+
+   if (allocated(calc%coulomb%es3)) then
+      associate(es3 => calc%coulomb%es3)
+         if (es3%shell_resolved) then
+            do iat = 1, mol%nat
+               izp = mol%id(iat)
+               ii = es3%ish_at(iat)
+               do ish = 1, es3%nsh_at(iat)
+                  hub = es3%hubbard_derivs(ish, izp)
+                  pot%vsh(ii+ish, 1) = pot%vsh(ii+ish, 1) &
+                     & + 2*hub*wfn_s%qsh(ii+ish, 1)*wfn_r%qsh(ii+ish, 1)
+               end do
+            end do
+         else
+            do iat = 1, mol%nat
+               hub = es3%hubbard_derivs(1, mol%id(iat))
+               pot%vat(iat, 1) = pot%vat(iat, 1) &
+                  & + 2*hub*wfn_s%qat(iat, 1)*wfn_r%qat(iat, 1)
+            end do
+         end if
+      end associate
    end if
 
-   select type(disp => calc%dispersion)
-   type is (d4_dispersion)
-      select type(model => disp%model)
-      type is (d4_model)
-         mref = maxval(model%ref)
-         allocate(gwvec(mref, mol%nat, model%ncoup), gwdcn(mref, mol%nat, model%ncoup), &
-            & gwdq(mref, mol%nat, model%ncoup), gwd2q(mref, mol%nat), source=0.0_wp)
+   if (.not.has_dispersion_kernel(calc)) return
+   call get_charge_weights(mol, calc, dcache, wfn%qat(:, 1), ptr, gw, error)
+   if (allocated(error)) return
 
-         call model%weight_references(mol, ptr%cn, wfn%qat(:, 1), gwvec, gwdcn, gwdq)
-
-         do iat = 1, mol%nat
-            izp = mol%id(iat)
-            c = model%eta(izp) * model%gc
-            u = wfn%qat(iat, 1) + model%zeff(izp)
-            if (abs(u) < small) cycle
-            do iref = 1, model%ref(izp)
-               gw = gwvec(iref, iat, 1)
-               if (abs(gw) < tiny(1.0_wp)) cycle
-               qref = model%q(iref, izp) + model%zeff(izp)
-               g = gwdq(iref, iat, 1) / gw
-               dg = g * (c*qref/u**2 - 2.0_wp/u)
-               gwd2q(iref, iat) = gw * (g*g + dg)
+   do iat = 1, mol%nat
+      do jat = 1, mol%nat
+         dha = 0.0_wp
+         dhb = 0.0_wp
+         do iref = 1, size(gw, 1)
+            do jref = 1, size(gw, 1)
+               w6 = ptr%dispmat(iref, iat, jref, jat)
+               dha = dha + w6 * (gw(iref, iat, 3)*gw(jref, jat, 0)*wfn_s%qat(iat, 1) &
+                  & + gw(iref, iat, 2)*gw(jref, jat, 1)*wfn_s%qat(jat, 1))
+               dhb = dhb + w6 * (gw(iref, iat, 2)*gw(jref, jat, 1)*wfn_s%qat(iat, 1) &
+                  & + gw(iref, iat, 1)*gw(jref, jat, 2)*wfn_s%qat(jat, 1))
             end do
          end do
-
-         !>-- the cached matrix holds the damped reference C6 of all pairs
-         do iat = 1, mol%nat
-            izp = mol%id(iat)
-            do jat = 1, mol%nat
-               jzp = mol%id(jat)
-               ha = 0.0_wp
-               hb = 0.0_wp
-               do iref = 1, model%ref(izp)
-                  do jref = 1, model%ref(jzp)
-                     w6 = ptr%dispmat(iref, iat, jref, jat)
-                     ha = ha + gwd2q(iref, iat) * gwvec(jref, jat, 1) * w6
-                     hb = hb + gwdq(iref, iat, 1) * gwdq(jref, jat, 1) * w6
-                  end do
-               end do
-               pot%vat(iat, 1) = pot%vat(iat, 1) &
-                  & + ha*wfn_r%qat(iat, 1) + hb*wfn_r%qat(jat, 1)
-            end do
-         end do
-      class default
-         call fatal_error(error, "Response kernel is only available for the D4 model")
-      end select
-   class default
-      call fatal_error(error, "Response kernel requires self-consistent D4 dispersion")
-   end select
-end subroutine add_dispersion_kernel
+         pot%vat(iat, 1) = pot%vat(iat, 1) &
+            & + dha*wfn_r%qat(iat, 1) + dhb*wfn_r%qat(jat, 1)
+      end do
+   end do
+end subroutine get_kernel_potential_derivative
 
 subroutine view(cache, ptr)
    !***********************************

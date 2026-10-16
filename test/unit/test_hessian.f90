@@ -26,8 +26,10 @@ module test_hessian
       & get_dispersion_potential_derivative
    use tblite_hessian_multipole, only : get_multipole_hessian, &
       & get_multipole_potential_derivative
+   use tblite_hessian_polarizability, only : xtb_polarizability_gradient
    use tblite_hessian_repulsion, only : get_repulsion_hessian
    use tblite_hessian_xtb, only : xtb_hessian
+   use tblite_response_polarizability, only : xtb_polarizability
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
@@ -77,7 +79,10 @@ subroutine collect_hessian(testsuite)
       new_unittest("gfn1-hessian-halogen", test_hessian_gfn1_halogen), &
       new_unittest("gfn1-dipgrad", test_dipgrad_gfn1), &
       new_unittest("gfn2-dipgrad", test_dipgrad_gfn2), &
-      new_unittest("unsupported-spin", test_unsupported_spin, should_fail=.true.) &
+      new_unittest("gfn1-polarizability-gradient", test_polgrad_gfn1), &
+      new_unittest("gfn2-polarizability-gradient", test_polgrad_gfn2), &
+      new_unittest("unsupported-spin", test_unsupported_spin, should_fail=.true.), &
+      new_unittest("unsupported-smearing", test_unsupported_smearing, should_fail=.true.) &
       ]
 
 end subroutine collect_hessian
@@ -532,7 +537,7 @@ subroutine test_hessian_gfn1(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
 
-   call get_structure(mol, "MB16-43", "01")
+   call get_structure(mol, "Heavy28", "sbh3_h2o")
    call new_gfn1_calculator(calc, mol, error)
    if (allocated(error)) return
    call test_hessian_gen(error, mol, calc, kt)
@@ -547,7 +552,7 @@ subroutine test_hessian_gfn2(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
 
-   call get_structure(mol, "MB16-43", "02")
+   call get_structure(mol, "Heavy28", "bih3_nh3")
    call new_gfn2_calculator(calc, mol, error)
    if (allocated(error)) return
    call test_hessian_gen(error, mol, calc, kt)
@@ -562,7 +567,7 @@ subroutine test_hessian_gfn1_smearing(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
 
-   call get_structure(mol, "MB16-43", "03")
+   call get_structure(mol, "Heavy28", "teh2_hcl")
    call new_gfn1_calculator(calc, mol, error)
    if (allocated(error)) return
    call test_hessian_gen(error, mol, calc, 0.02_wp)
@@ -656,7 +661,7 @@ subroutine test_dipgrad_gfn1(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
 
-   call get_structure(mol, "MB16-43", "01")
+   call get_structure(mol, "Heavy28", "pbh4_h2o")
    call new_gfn1_calculator(calc, mol, error)
    if (allocated(error)) return
    call test_dipgrad_gen(error, mol, calc)
@@ -671,12 +676,120 @@ subroutine test_dipgrad_gfn2(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
 
-   call get_structure(mol, "MB16-43", "02")
+   call get_structure(mol, "Heavy28", "sbh3_hcl")
    call new_gfn2_calculator(calc, mol, error)
    if (allocated(error)) return
    call test_dipgrad_gen(error, mol, calc)
 
 end subroutine test_dipgrad_gfn2
+
+subroutine test_polgrad_gen(error, mol, calc)
+   !***********************************
+   !* Compare the analytic derivative of the polarizability against finite
+   !* differences of the analytic polarizability.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+
+   integer :: iat, ic
+   type(context_type) :: ctx
+   type(structure_type) :: displ
+   type(wavefunction_type) :: wfn0, wfn
+   real(wp) :: energy, alphar(3, 3), alphal(3, 3)
+   real(wp), allocatable :: dalpha(:, :, :, :), numalpha(:, :, :, :)
+   real(wp), parameter :: step = 1.0e-3_wp, thr_scf = 2.0e-4_wp
+
+   call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
+
+   allocate(dalpha(3, 3, 3, mol%nat), numalpha(3, 3, 3, mol%nat))
+   call xtb_polarizability_gradient(ctx, mol, calc, wfn0, dalpha)
+   if (ctx%failed()) then
+      call ctx%get_error(error)
+      return
+   end if
+
+   displ = mol
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         wfn = wfn0
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) + step
+         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
+         call xtb_polarizability(ctx, displ, calc, wfn, alphar)
+         wfn = wfn0
+         displ%xyz(ic, iat) = mol%xyz(ic, iat) - step
+         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
+         call xtb_polarizability(ctx, displ, calc, wfn, alphal)
+         displ%xyz(ic, iat) = mol%xyz(ic, iat)
+         numalpha(:, :, ic, iat) = (alphar - alphal) / (2*step)
+      end do
+   end do
+
+   if (any(abs(dalpha - numalpha) > thr_scf)) then
+      call test_failed(error, "Polarizability derivative does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(dalpha - numalpha))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(numalpha))
+   end if
+
+end subroutine test_polgrad_gen
+
+subroutine test_polgrad_gfn1(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "teh2_h2s")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_polgrad_gen(error, mol, calc)
+
+end subroutine test_polgrad_gfn1
+
+subroutine test_polgrad_gfn2(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "teh2_hcl")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call test_polgrad_gen(error, mol, calc)
+
+end subroutine test_polgrad_gfn2
+
+subroutine test_unsupported_smearing(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(context_type) :: ctx
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   real(wp) :: energy
+   real(wp), allocatable :: dalpha(:, :, :, :)
+
+   call get_structure(mol, "Heavy28", "teh2_hcl")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, 0.02_wp)
+   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
+
+   allocate(dalpha(3, 3, 3, mol%nat))
+   call xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
+   if (ctx%failed()) call ctx%get_error(error)
+
+end subroutine test_unsupported_smearing
 
 subroutine test_unsupported_spin(error)
 

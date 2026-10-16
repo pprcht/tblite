@@ -23,6 +23,8 @@ list(
   "${dir}/hamiltonian.f90"
   "${dir}/multipole.f90"
   "${dir}/pair.f90"
+  "${dir}/polarizability.f90"
+  "${dir}/reference.f90"
   "${dir}/repulsion.f90"
   "${dir}/xtb.f90"
 )

@@ -20,6 +20,8 @@ srcs += files(
   'hamiltonian.f90',
   'multipole.f90',
   'pair.f90',
+  'polarizability.f90',
+  'reference.f90',
   'repulsion.f90',
   'xtb.f90',
 )

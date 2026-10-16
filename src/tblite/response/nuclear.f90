@@ -39,7 +39,7 @@ module tblite_response_nuclear
 contains
 
 subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0, wfn_m, &
-      & dp, dw, pot, wfn_r, error)
+      & dp, dw, pot, wfn_r, error, fock_r)
    !***********************************
    !* Solve the coupled-perturbed equations for one Cartesian displacement.
    !* The perturbation enters via the derivative of the overlap ds and of
@@ -80,6 +80,8 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    type(wavefunction_type), intent(inout) :: wfn_r
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> First-order Hamiltonian including the response of the potential
+   real(wp), intent(out), optional :: fock_r(:, :)
 
    real(wp), allocatable :: fock(:, :, :), rhs(:, :, :)
 
@@ -107,6 +109,7 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    call get_fock_response(calc, ints, pot, fock)
    fock(:, :, 1) = fock(:, :, 1) + fock0
    call wdensity_response(wfn, fock(:, :, 1), dw, ds)
+   if (present(fock_r)) fock_r(:, :) = fock(:, :, 1)
 end subroutine xtb_nuclear_response
 
 end module tblite_response_nuclear
