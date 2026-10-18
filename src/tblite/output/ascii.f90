@@ -29,7 +29,8 @@ module tblite_output_ascii
    implicit none
    private
 
-   public :: ascii_levels, ascii_dipole_moments, ascii_quadrupole_moments
+   public :: ascii_levels, ascii_dipole_moments, ascii_quadrupole_moments, &
+      & ascii_polarizability
    public :: json_results, tagged_result, ascii_atomic_charges
 
 contains
@@ -131,6 +132,28 @@ subroutine ascii_dipole_moments(unit, verbosity, mol, dpat, dpmom)
    write(unit, "(a)")
 end subroutine ascii_dipole_moments
 
+subroutine ascii_polarizability(unit, verbosity, alpha)
+   integer, intent(in) :: unit
+   integer, intent(in) :: verbosity
+   real(wp), intent(in) :: alpha(:, :)
+
+   integer :: ic
+   character(len=1), parameter :: label(3) = ["x", "y", "z"]
+
+   write(unit, '(a,":")') "Polarizability (in atomic units)"
+   write(unit, '(44("-"))')
+   write(unit, "(5x, *(1x, a12))") label
+   write(unit, '(44("-"))')
+   do ic = 1, 3
+      write(unit, "(4x, a1, *(1x, f12.6))") label(ic), alpha(:, ic)
+   end do
+   write(unit, '(44("-"))')
+   write(unit, "(1x, a9, 1x, f12.6)") "isotropic", &
+      & (alpha(1, 1) + alpha(2, 2) + alpha(3, 3)) / 3.0_wp
+   write(unit, '(44("-"))')
+   write(unit, "(a)")
+end subroutine ascii_polarizability
+
 subroutine ascii_atomic_charges(unit, verbosity, mol, qat)
    integer, intent(in) :: unit
    integer, intent(in) :: verbosity
@@ -179,7 +202,8 @@ subroutine ascii_quadrupole_moments(unit, verbosity, mol, qpat, qpmom)
 end subroutine ascii_quadrupole_moments
 
 
-subroutine json_results(unit, indentation, energy, gradient, sigma, energies, charges)
+subroutine json_results(unit, indentation, energy, gradient, sigma, energies, charges, &
+      & hessian, dipole_gradient, polarizability, polarizability_gradient)
    integer, intent(in) :: unit
    character(len=*), intent(in), optional :: indentation
    real(wp), intent(in), optional :: energy
@@ -187,6 +211,10 @@ subroutine json_results(unit, indentation, energy, gradient, sigma, energies, ch
    real(wp), intent(in), optional :: sigma(:, :)
    real(wp), intent(in), optional :: energies(:)
    real(wp), intent(in), optional :: charges(:)
+   real(wp), intent(in), optional :: hessian(:, :)
+   real(wp), intent(in), optional :: dipole_gradient(:, :, :)
+   real(wp), intent(in), optional :: polarizability(:, :)
+   real(wp), intent(in), optional :: polarizability_gradient(:, :, :, :)
    character(len=:), allocatable :: indent, version_string
    character(len=*), parameter :: jsonkey = "('""',a,'"":',1x)"
    real(wp), allocatable :: array(:)
@@ -234,6 +262,34 @@ subroutine json_results(unit, indentation, energy, gradient, sigma, energies, ch
       array = reshape(charges, [size(charges)])
       call write_json_array(unit, array, indent)
    end if
+   if (present(hessian)) then
+      write(unit, '(",")', advance="no")
+      if (allocated(indent)) write(unit, "(/,a)", advance="no") repeat(indent, 1)
+      write(unit, jsonkey, advance="no") "hessian"
+      array = reshape(hessian, [size(hessian)])
+      call write_json_array(unit, array, indent)
+   end if
+   if (present(dipole_gradient)) then
+      write(unit, '(",")', advance="no")
+      if (allocated(indent)) write(unit, "(/,a)", advance="no") repeat(indent, 1)
+      write(unit, jsonkey, advance="no") "dipole gradient"
+      array = reshape(dipole_gradient, [size(dipole_gradient)])
+      call write_json_array(unit, array, indent)
+   end if
+   if (present(polarizability)) then
+      write(unit, '(",")', advance="no")
+      if (allocated(indent)) write(unit, "(/,a)", advance="no") repeat(indent, 1)
+      write(unit, jsonkey, advance="no") "polarizability"
+      array = reshape(polarizability, [size(polarizability)])
+      call write_json_array(unit, array, indent)
+   end if
+   if (present(polarizability_gradient)) then
+      write(unit, '(",")', advance="no")
+      if (allocated(indent)) write(unit, "(/,a)", advance="no") repeat(indent, 1)
+      write(unit, jsonkey, advance="no") "polarizability gradient"
+      array = reshape(polarizability_gradient, [size(polarizability_gradient)])
+      call write_json_array(unit, array, indent)
+   end if
    if (allocated(indent)) write(unit, "(/)", advance="no")
    write(unit, '("}")')
 
@@ -256,12 +312,17 @@ subroutine write_json_array(unit, array, indent)
 end subroutine write_json_array
 
 
-subroutine tagged_result(unit, energy, gradient, sigma, energies)
+subroutine tagged_result(unit, energy, gradient, sigma, energies, hessian, &
+      & dipole_gradient, polarizability, polarizability_gradient)
    integer, intent(in) :: unit
    real(wp), intent(in), optional :: energy
    real(wp), intent(in), optional :: gradient(:, :)
    real(wp), intent(in), optional :: sigma(:, :)
    real(wp), intent(in), optional :: energies(:)
+   real(wp), intent(in), optional :: hessian(:, :)
+   real(wp), intent(in), optional :: dipole_gradient(:, :, :)
+   real(wp), intent(in), optional :: polarizability(:, :)
+   real(wp), intent(in), optional :: polarizability_gradient(:, :, :, :)
    character(len=*), parameter :: tag_header = &
       & '(a,t20,":",a,":",i0,":",*(i0:,","))'
 
@@ -280,6 +341,23 @@ subroutine tagged_result(unit, energy, gradient, sigma, energies)
    if (present(sigma)) then
       write(unit, tag_header) "virial", "real", 2, shape(sigma)
       write(unit, "(3es24.16)") sigma
+   end if
+   if (present(hessian)) then
+      write(unit, tag_header) "hessian", "real", 2, shape(hessian)
+      write(unit, "(3es24.16)") hessian
+   end if
+   if (present(dipole_gradient)) then
+      write(unit, tag_header) "dipole-gradient", "real", 3, shape(dipole_gradient)
+      write(unit, "(3es24.16)") dipole_gradient
+   end if
+   if (present(polarizability)) then
+      write(unit, tag_header) "polarizability", "real", 2, shape(polarizability)
+      write(unit, "(3es24.16)") polarizability
+   end if
+   if (present(polarizability_gradient)) then
+      write(unit, tag_header) "polar-gradient", "real", 4, &
+         & shape(polarizability_gradient)
+      write(unit, "(3es24.16)") polarizability_gradient
    end if
 
 end subroutine tagged_result

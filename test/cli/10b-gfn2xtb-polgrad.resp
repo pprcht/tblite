@@ -1,0 +1,6 @@
+run
+--method
+gfn2
+--hess
+--polgrad
+$ORIGIN/10-h2co.xyz

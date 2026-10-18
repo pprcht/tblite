@@ -148,6 +148,21 @@ Supported geometry input formats are:
      Evaluates analytical gradient,
      results are stored in _file_ (default: tblite.txt)
 
+*--hess*::
+     Evaluates the analytical Hessian and the derivative of the dipole moment
+     with respect to the atomic positions.
+     Results are stored together with the gradient information.
+     Only available for closed-shell molecules without solvation model.
+
+*--polar*::
+     Evaluates the analytical static dipole polarizability.
+     Only available for closed-shell molecules without solvation model.
+
+*--polgrad*::
+     Evaluates the analytical derivative of the polarizability
+     with respect to the atomic positions, implies *--polar*.
+     Requires integer occupation numbers.
+
 *--post-processing* _file_|_name_::
      Add post processing methods to the calculation either by using a toml file as input
      or by specifying the post-processing step name directly.

@@ -64,6 +64,8 @@ run_testcases = [
   '07f-ceh',
   '07g-ceh',
   '09a-gfn2xtb-anneal',
+  '10a-gfn1xtb-hess',
+  '10b-gfn2xtb-polgrad',
 ]
 foreach case: run_testcases
   test(

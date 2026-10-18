@@ -50,6 +50,12 @@ module tblite_cli
       logical :: grad = .false.
       !> File for output of gradient information
       character(len=:), allocatable :: grad_output
+      !> Evaluate Hessian and dipole derivatives
+      logical :: hess = .false.
+      !> Evaluate polarizability
+      logical :: polar = .false.
+      !> Evaluate derivative of the polarizability
+      logical :: polgrad = .false.
       !> Verbosity of calculation
       integer :: verbosity = 2
       !> Total charge of the system
@@ -691,6 +697,16 @@ subroutine get_run_arguments(config, list, start, error)
             call move_alloc(arg, config%grad_output)
          end if
 
+      case("--hess")
+         config%hess = .true.
+
+      case("--polar")
+         config%polar = .true.
+
+      case("--polgrad")
+         config%polar = .true.
+         config%polgrad = .true.
+
       case("--json")
          config%json = .true.
          config%json_output = "tblite.json"
@@ -784,7 +800,8 @@ subroutine get_run_arguments(config, list, start, error)
 
    if (.not.allocated(config%guess)) config%guess = "sad"
 
-   if (config%grad .and. .not.allocated(config%grad_output) .and. .not.config%json) then
+   if ((config%grad .or. config%hess .or. config%polar) &
+      & .and. .not.allocated(config%grad_output) .and. .not.config%json) then
       config%grad_output = "tblite.txt"
    end if
 end subroutine get_run_arguments

@@ -1,0 +1,5 @@
+run
+--method
+gfn1
+--hess
+$ORIGIN/10-h2co.xyz
