@@ -987,3 +987,66 @@ def test_spin_polarized_restart():
     # Verify iteration count (should be very low, e.g., <= 3)
     # Ideally 1 or 2 if restart is perfect
     assert iterations <= 3, f"Restart took {iterations} iterations, expected <= 3"
+
+
+def test_response():
+    """Analytic Hessian, dipole derivatives, polarizability and its derivative"""
+    numbers = np.array([8, 6, 1, 1])
+    positions = np.array(
+        [
+            [+0.00000000000000, +0.00000000000000, +2.27334000000000],
+            [+0.00000000000000, +0.00000000000000, +0.00000000000000],
+            [+0.00000000000000, +1.77634000000000, -1.10927000000000],
+            [+0.00000000000000, -1.77634000000000, -1.10927000000000],
+        ]
+    )
+
+    calc = Calculator("GFN2-xTB", numbers, positions)
+    calc.set("accuracy", 1.0e-3)
+
+    with raises(TBLiteRuntimeError, match="single point"):
+        calc.hessian(Result())
+
+    res = calc.singlepoint()
+    with raises(TBLiteRuntimeError, match="Hessian"):
+        res.get("hessian")
+
+    calc.hessian(res)
+    calc.polarizability(res, gradient=True)
+
+    hessian = res.get("hessian")
+    dipgrad = res.get("dipole-gradient")
+    alpha = res.get("polarizability")
+    dalpha = res.get("polarizability-gradient")
+
+    assert hessian.shape == (12, 12)
+    assert dipgrad.shape == (4, 3, 3)
+    assert alpha.shape == (3, 3)
+    assert dalpha.shape == (4, 3, 3, 3)
+
+    assert hessian == approx(hessian.T, abs=THR)
+    assert hessian.reshape(12, 4, 3).sum(axis=1) == approx(0.0, abs=THR)
+    assert dipgrad.sum(axis=0) == approx(0.0, abs=THR)
+    assert dalpha.sum(axis=0) == approx(0.0, abs=100 * THR)
+    assert alpha == approx(alpha.T, abs=THR)
+
+    assert hessian[2, 2] == approx(0.829992682822, abs=THR)
+    assert dipgrad[0, 2, 2] == approx(-0.962659191555, abs=THR)
+    assert alpha[2, 2] == approx(12.542934307512, abs=THR)
+    assert dalpha[0, 2, 2, 2] == approx(10.488106857003, abs=10 * THR)
+
+    # numerical derivative of the dipole moment along one coordinate
+    step = 1.0e-4
+    dipoles = []
+    for sign in (+1, -1):
+        displaced = positions.copy()
+        displaced[0, 2] += sign * step
+        calc.update(displaced)
+        dipoles.append(calc.singlepoint(copy=True).get("dipole"))
+    assert dipgrad[0, 2] == approx((dipoles[0] - dipoles[1]) / (2 * step), abs=1e-5)
+
+    # a new single point calculation invalidates the response properties
+    calc.update(positions)
+    calc.singlepoint(res)
+    with raises(TBLiteRuntimeError, match="polarizability"):
+        res.get("polarizability")

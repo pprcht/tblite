@@ -1793,6 +1793,179 @@ err:
     return 1;
 }
 
+int test_response_h2co(void)
+{
+    printf("Start test: response properties\n");
+    tblite_error error = NULL;
+    tblite_context ctx = NULL;
+    tblite_structure mol = NULL;
+    tblite_calculator calc = NULL;
+    tblite_result res = NULL;
+
+    const double thr = 1.0e-6;
+    const int natoms = 4;
+    int num[4] = { 8, 6, 1, 1 };
+    double xyz[12] = {
+        +0.00000000000000, +0.00000000000000, +2.27334000000000,
+        +0.00000000000000, +0.00000000000000, +0.00000000000000,
+        +0.00000000000000, +1.77634000000000, -1.10927000000000,
+        +0.00000000000000, -1.77634000000000, -1.10927000000000,
+    };
+    double hessian[12 * 12], dipgrad[4 * 3 * 3], alpha[3 * 3], dalpha[4 * 3 * 3 * 3];
+    double sum;
+
+    error = tblite_new_error();
+    ctx = tblite_new_context();
+    res = tblite_new_result();
+
+    tblite_set_context_verbosity(ctx, 0);
+    if (tblite_check(ctx))
+        goto err;
+
+    mol = tblite_new_structure(error, natoms, num, xyz, NULL, NULL, NULL, NULL);
+    if (tblite_check(error))
+        goto err;
+
+    calc = tblite_new_gfn2_calculator(ctx, mol, NULL);
+    if (!calc)
+        goto err;
+
+    tblite_set_calculator_accuracy(ctx, calc, 1.0e-3);
+    if (tblite_check(ctx))
+        goto err;
+
+    // response properties require a preceding single point calculation
+    tblite_get_hessian(ctx, mol, calc, res);
+    if (!tblite_check(ctx))
+        goto err;
+
+    show(ctx);
+
+    tblite_get_result_hessian(error, res, hessian);
+    if (!tblite_check(error))
+        goto err;
+
+    show(error);
+
+    tblite_get_singlepoint(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_hessian(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_polarizability(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_polarizability_gradient(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_result_hessian(error, res, hessian);
+    if (tblite_check(error))
+        goto err;
+
+    tblite_get_result_dipole_gradient(error, res, dipgrad);
+    if (tblite_check(error))
+        goto err;
+
+    tblite_get_result_polarizability(error, res, alpha);
+    if (tblite_check(error))
+        goto err;
+
+    tblite_get_result_polarizability_gradient(error, res, dalpha);
+    if (tblite_check(error))
+        goto err;
+
+    // Hessian is symmetric and invariant under translations
+    for (int i = 0; i < 12; i++) {
+        for (int j = 0; j < i; j++) {
+            if (!check(hessian[12 * i + j], hessian[12 * j + i], thr, "hessian symmetry"))
+                goto err;
+        }
+        for (int c = 0; c < 3; c++) {
+            sum = 0.0;
+            for (int iat = 0; iat < natoms; iat++)
+                sum += hessian[12 * i + 3 * iat + c];
+            if (!check(sum, 0.0, thr, "hessian sum rule"))
+                goto err;
+        }
+    }
+
+    // dipole moment of a neutral molecule is invariant under translations
+    for (int i = 0; i < 9; i++) {
+        sum = 0.0;
+        for (int iat = 0; iat < natoms; iat++)
+            sum += dipgrad[9 * iat + i];
+        if (!check(sum, 0.0, thr, "dipole gradient sum rule"))
+            goto err;
+    }
+
+    // polarizability is invariant under translations
+    for (int i = 0; i < 27; i++) {
+        sum = 0.0;
+        for (int iat = 0; iat < natoms; iat++)
+            sum += dalpha[27 * iat + i];
+        if (!check(sum, 0.0, 100 * thr, "polarizability gradient sum rule"))
+            goto err;
+    }
+
+    if (!check(alpha[1], alpha[3], thr, "polarizability symmetry"))
+        goto err;
+
+    if (!check(hessian[12 * 2 + 2], 0.829992682822, thr, "hessian error"))
+        goto err;
+
+    if (!check(dipgrad[9 * 0 + 3 * 2 + 2], -0.962659191555, thr, "dipole gradient error"))
+        goto err;
+
+    if (!check(alpha[8], 12.542934307512, thr, "polarizability error"))
+        goto err;
+
+    if (!check(dalpha[27 * 0 + 9 * 2 + 8], 10.488106857003, 10 * thr, "polarizability gradient error"))
+        goto err;
+
+    // a new single point calculation invalidates the response properties
+    tblite_get_singlepoint(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_result_polarizability(error, res, alpha);
+    if (!tblite_check(error))
+        goto err;
+
+    show(error);
+
+    tblite_delete(error);
+    tblite_delete(ctx);
+    tblite_delete(mol);
+    tblite_delete(calc);
+    tblite_delete(res);
+    return 0;
+
+err:
+    if (tblite_check(error)) {
+        char message[512];
+        tblite_get_error(error, message, NULL);
+        printf("[Fatal] %s\n", message);
+    }
+
+    if (tblite_check(ctx)) {
+        char message[512];
+        tblite_get_context_error(ctx, message, NULL);
+        printf("[Fatal] %s\n", message);
+    }
+
+    tblite_delete(error);
+    tblite_delete(ctx);
+    tblite_delete(mol);
+    tblite_delete(calc);
+    tblite_delete(res);
+    return 1;
+}
+
 int test_gfn1_co2(void)
 {
     printf("Start test: GFN1-xTB\n");
@@ -4441,6 +4614,7 @@ int main(void)
     stat += test_gfn2_si5h12();
     stat += test_ipea1_ch4();
     stat += test_gfn1_co2();
+    stat += test_response_h2co();
     stat += test_gfn2_convergence();
     stat += test_spgfn1();
     stat += test_calc_restart();

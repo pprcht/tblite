@@ -28,10 +28,13 @@ module tblite_api_calculator
    use tblite_api_structure, only : vp_structure
    use tblite_api_utils, only : f_c_character, c_f_character
    use tblite_api_version, only : namespace
+   use tblite_hessian_polarizability, only : xtb_polarizability_gradient
+   use tblite_hessian_xtb, only : xtb_hessian
    use tblite_post_processing_list, only : post_processing_list, add_post_processing
    use tblite_post_processing_localization, only : new_orbital_localization, &
       & orbital_localization
    use tblite_post_processing_type, only : post_processing_type
+   use tblite_response_polarizability, only : xtb_polarizability
    use tblite_results, only : results_type
    use tblite_scf_mixer_input, only : anneal_input, scf_version
    use tblite_wavefunction, only : wavefunction_type, new_wavefunction, &
@@ -54,6 +57,7 @@ module tblite_api_calculator
       & set_calculator_accuracy_api, set_calculator_temperature_api, &
       & set_calculator_save_integrals_api
    public :: get_singlepoint_api
+   public :: get_hessian_api, get_polarizability_api, get_polarizability_gradient_api
    public :: push_back_post_processing_param_api, push_back_post_processing_str_api, &
       & push_back_post_processing_localization_api
 
@@ -666,6 +670,12 @@ subroutine get_singlepoint_api(vctx, vmol, vcalc, vres) &
    res%gradient = spread([0.0_wp, 0.0_wp, 0.0_wp], 2, mol%ptr%nat)
    res%sigma = spread([0.0_wp, 0.0_wp, 0.0_wp], 2, 3)
 
+   ! response properties of a previous calculation are not valid anymore
+   if (allocated(res%hessian)) deallocate(res%hessian)
+   if (allocated(res%dipgrad)) deallocate(res%dipgrad)
+   if (allocated(res%alpha)) deallocate(res%alpha)
+   if (allocated(res%dalpha)) deallocate(res%dalpha)
+
    call check_results(res%results)
 
    call check_wavefunction(res%wfn, mol%ptr, calc%ptr, calc%etemp, &
@@ -686,6 +696,132 @@ subroutine get_singlepoint_api(vctx, vmol, vcalc, vres) &
       & post_process=calc%post_proc)
 
 end subroutine get_singlepoint_api
+
+subroutine get_response_handles(vctx, vmol, vcalc, vres, ctx, mol, calc, res, ok)
+   !***********************************
+   !* Resolve the handles for the evaluation of a response property and
+   !* check that the result container holds a wavefunction.
+   !***********************************
+   type(c_ptr), intent(in) :: vctx
+   type(c_ptr), intent(in) :: vmol
+   type(c_ptr), intent(in) :: vcalc
+   type(c_ptr), intent(in) :: vres
+   type(vp_context), pointer, intent(out) :: ctx
+   type(vp_structure), pointer, intent(out) :: mol
+   type(vp_calculator), pointer, intent(out) :: calc
+   type(vp_result), pointer, intent(out) :: res
+   logical, intent(out) :: ok
+   type(error_type), allocatable :: error
+
+   ok = .false.
+   if (.not.c_associated(vctx)) return
+   call c_f_pointer(vctx, ctx)
+
+   if (.not.c_associated(vmol)) then
+      call fatal_error(error, "Molecular structure data is missing")
+      call ctx%ptr%set_error(error)
+      return
+   end if
+   call c_f_pointer(vmol, mol)
+
+   if (.not.c_associated(vcalc)) then
+      call fatal_error(error, "Calculator object is missing")
+      call ctx%ptr%set_error(error)
+      return
+   end if
+   call c_f_pointer(vcalc, calc)
+
+   if (.not.c_associated(vres)) then
+      call fatal_error(error, "Result container is missing")
+      call ctx%ptr%set_error(error)
+      return
+   end if
+   call c_f_pointer(vres, res)
+
+   if (.not.allocated(res%wfn) .or. .not.allocated(res%energy)) then
+      call fatal_error(error, "Result does not contain a converged wavefunction, "// &
+         & "perform a single point calculation first")
+      call ctx%ptr%set_error(error)
+      return
+   end if
+   if (size(res%wfn%qat, 1) /= mol%ptr%nat &
+      & .or. size(res%wfn%density, 1) /= calc%ptr%bas%nao) then
+      call fatal_error(error, "Wavefunction in result does not match the calculator")
+      call ctx%ptr%set_error(error)
+      return
+   end if
+   ok = .true.
+end subroutine get_response_handles
+
+subroutine get_hessian_api(vctx, vmol, vcalc, vres) &
+      & bind(C, name=namespace//"get_hessian")
+   type(c_ptr), value :: vctx
+   type(vp_context), pointer :: ctx
+   type(c_ptr), value :: vmol
+   type(vp_structure), pointer :: mol
+   type(c_ptr), value :: vcalc
+   type(vp_calculator), pointer :: calc
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_hessian"
+
+   call get_response_handles(vctx, vmol, vcalc, vres, ctx, mol, calc, res, ok)
+   if (.not.ok) return
+
+   if (allocated(res%hessian)) deallocate(res%hessian)
+   if (allocated(res%dipgrad)) deallocate(res%dipgrad)
+   allocate(res%hessian(3*mol%ptr%nat, 3*mol%ptr%nat), res%dipgrad(3, 3, mol%ptr%nat))
+   call xtb_hessian(ctx%ptr, mol%ptr, calc%ptr, res%wfn, res%hessian, res%dipgrad)
+   if (ctx%ptr%failed()) deallocate(res%hessian, res%dipgrad)
+end subroutine get_hessian_api
+
+subroutine get_polarizability_api(vctx, vmol, vcalc, vres) &
+      & bind(C, name=namespace//"get_polarizability")
+   type(c_ptr), value :: vctx
+   type(vp_context), pointer :: ctx
+   type(c_ptr), value :: vmol
+   type(vp_structure), pointer :: mol
+   type(c_ptr), value :: vcalc
+   type(vp_calculator), pointer :: calc
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_polarizability"
+
+   call get_response_handles(vctx, vmol, vcalc, vres, ctx, mol, calc, res, ok)
+   if (.not.ok) return
+
+   if (allocated(res%alpha)) deallocate(res%alpha)
+   allocate(res%alpha(3, 3))
+   call xtb_polarizability(ctx%ptr, mol%ptr, calc%ptr, res%wfn, res%alpha)
+   if (ctx%ptr%failed()) deallocate(res%alpha)
+end subroutine get_polarizability_api
+
+subroutine get_polarizability_gradient_api(vctx, vmol, vcalc, vres) &
+      & bind(C, name=namespace//"get_polarizability_gradient")
+   type(c_ptr), value :: vctx
+   type(vp_context), pointer :: ctx
+   type(c_ptr), value :: vmol
+   type(vp_structure), pointer :: mol
+   type(c_ptr), value :: vcalc
+   type(vp_calculator), pointer :: calc
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_polarizability_gradient"
+
+   call get_response_handles(vctx, vmol, vcalc, vres, ctx, mol, calc, res, ok)
+   if (.not.ok) return
+
+   if (allocated(res%dalpha)) deallocate(res%dalpha)
+   allocate(res%dalpha(3, 3, 3, mol%ptr%nat))
+   call xtb_polarizability_gradient(ctx%ptr, mol%ptr, calc%ptr, res%wfn, res%dalpha)
+   if (ctx%ptr%failed()) deallocate(res%dalpha)
+end subroutine get_polarizability_gradient_api
 
 subroutine check_results(res)
    type(results_type), allocatable, intent(inout) :: res

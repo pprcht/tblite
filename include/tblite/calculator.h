@@ -273,6 +273,49 @@ tblite_get_singlepoint(tblite_context ctx,
                        tblite_calculator calc,
                        tblite_result res);
 
+/// Evaluate analytic Hessian and derivative of the dipole moment.
+/// Requires the result of a tightly converged single point calculation
+/// for a closed-shell molecule without solvation model.
+///
+/// @param ctx: Context handle
+/// @param mol: Molecular structure data
+/// @param calc: Calculator instance
+/// @param res: Result container of a preceding single point calculation
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_hessian(tblite_context ctx,
+                   tblite_structure mol,
+                   tblite_calculator calc,
+                   tblite_result res);
+
+/// Evaluate analytic static dipole polarizability.
+/// Requires the result of a tightly converged single point calculation
+/// for a closed-shell molecule without solvation model.
+///
+/// @param ctx: Context handle
+/// @param mol: Molecular structure data
+/// @param calc: Calculator instance
+/// @param res: Result container of a preceding single point calculation
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_polarizability(tblite_context ctx,
+                          tblite_structure mol,
+                          tblite_calculator calc,
+                          tblite_result res);
+
+/// Evaluate analytic derivative of the polarizability with respect to the
+/// atomic positions. Requires the result of a tightly converged single point
+/// calculation with integer occupation numbers for a closed-shell molecule
+/// without solvation model.
+///
+/// @param ctx: Context handle
+/// @param mol: Molecular structure data
+/// @param calc: Calculator instance
+/// @param res: Result container of a preceding single point calculation
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_polarizability_gradient(tblite_context ctx,
+                                   tblite_structure mol,
+                                   tblite_calculator calc,
+                                   tblite_result res);
+
 /// Push Back new container to post processing construct
 ///
 /// @param ctx: Context handle

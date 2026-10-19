@@ -135,6 +135,48 @@ tblite_get_result_virial(tblite_error error,
                          tblite_result res,
                          double* sigma);
 
+/// Retrieve Hessian from result container
+///
+/// @param error: Handle for error messages
+/// @param res: Result container
+/// @param hessian: Second derivatives of the energy, shape [3*nat][3*nat]
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_result_hessian(tblite_error error,
+                          tblite_result res,
+                          double* hessian);
+
+/// Retrieve derivative of the dipole moment from result container
+///
+/// @param error: Handle for error messages
+/// @param res: Result container
+/// @param dipgrad: Derivative of the dipole moment, shape [nat][3][3],
+///                 the last dimension is the component of the dipole moment
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_result_dipole_gradient(tblite_error error,
+                                  tblite_result res,
+                                  double* dipgrad);
+
+/// Retrieve static dipole polarizability from result container
+///
+/// @param error: Handle for error messages
+/// @param res: Result container
+/// @param alpha: Polarizability tensor, shape [3][3]
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_result_polarizability(tblite_error error,
+                                 tblite_result res,
+                                 double* alpha);
+
+/// Retrieve derivative of the polarizability from result container
+///
+/// @param error: Handle for error messages
+/// @param res: Result container
+/// @param dalpha: Derivative of the polarizability, shape [nat][3][3][3],
+///                the last two dimensions are the components of the tensor
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_get_result_polarizability_gradient(tblite_error error,
+                                          tblite_result res,
+                                          double* dalpha);
+
 /// Retrieve atomic charges from result container
 ///
 /// @param error: Handle for error messages

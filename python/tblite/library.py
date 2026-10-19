@@ -551,6 +551,43 @@ def get_virial(res) -> np.ndarray:
     return _virial
 
 
+def get_hessian(res) -> np.ndarray:
+    """Retrieve Hessian from result container"""
+    ndim = 3 * get_number_of_atoms(res)
+    _hessian = np.zeros((ndim, ndim))
+    error_check(lib.tblite_get_result_hessian)(
+        res, ffi.cast("double*", _hessian.ctypes.data)
+    )
+    return _hessian
+
+
+def get_dipole_gradient(res) -> np.ndarray:
+    """Retrieve derivative of the dipole moment from result container"""
+    _dipgrad = np.zeros((get_number_of_atoms(res), 3, 3))
+    error_check(lib.tblite_get_result_dipole_gradient)(
+        res, ffi.cast("double*", _dipgrad.ctypes.data)
+    )
+    return _dipgrad
+
+
+def get_polarizability(res) -> np.ndarray:
+    """Retrieve static dipole polarizability from result container"""
+    _alpha = np.zeros((3, 3))
+    error_check(lib.tblite_get_result_polarizability)(
+        res, ffi.cast("double*", _alpha.ctypes.data)
+    )
+    return _alpha
+
+
+def get_polarizability_gradient(res) -> np.ndarray:
+    """Retrieve derivative of the polarizability from result container"""
+    _dalpha = np.zeros((get_number_of_atoms(res), 3, 3, 3))
+    error_check(lib.tblite_get_result_polarizability_gradient)(
+        res, ffi.cast("double*", _dalpha.ctypes.data)
+    )
+    return _dalpha
+
+
 def get_charges(res) -> np.ndarray:
     """Retrieve atomic charges from result container"""
     _charges = np.zeros((get_number_of_atoms(res),))
@@ -888,6 +925,9 @@ def set_calculator_verbosity(ctx, calc, verbosity: int):
 
 
 get_singlepoint = context_check(lib.tblite_get_singlepoint)
+calc_hessian = context_check(lib.tblite_get_hessian)
+calc_polarizability = context_check(lib.tblite_get_polarizability)
+calc_polarizability_gradient = context_check(lib.tblite_get_polarizability_gradient)
 
 
 def _delete_container(cont) -> None:

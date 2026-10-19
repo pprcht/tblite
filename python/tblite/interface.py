@@ -234,6 +234,10 @@ class Result:
         "energies": library.get_energies,
         "gradient": library.get_gradient,
         "virial": library.get_virial,
+        "hessian": library.get_hessian,
+        "dipole-gradient": library.get_dipole_gradient,
+        "polarizability": library.get_polarizability,
+        "polarizability-gradient": library.get_polarizability_gradient,
         "charges": library.get_charges,
         "bond-orders": library.get_bond_orders,
         "dipole": library.get_dipole,
@@ -274,6 +278,10 @@ class Result:
          energies                    nat                               Hartree
          gradient                    nat, 3                            Hartree/Bohr
          virial                      3, 3                              Hartree
+         hessian                     3*nat, 3*nat                      Hartree/Bohr²
+         dipole-gradient             nat, 3, 3                         e
+         polarizability              3, 3                              e²·Bohr²/Hartree
+         polarizability-gradient     nat, 3, 3, 3                      e²·Bohr/Hartree
          charges                     nat                               e
          bond-orders                 nat, nat                          e
          dipole                      3                                 e·Bohr
@@ -692,6 +700,49 @@ class Calculator(Structure):
         _res = Result(res) if copy or res is None else res
         library.get_singlepoint(self._ctx, self._mol, self._calc, _res._res)
         return _res
+
+    def hessian(self, res: Result) -> Result:
+        """
+        Evaluate the analytic Hessian and the derivative of the dipole moment
+        with respect to the atomic positions. Both are stored in the provided
+        result container, which must hold the result of a single point calculation
+        for the current geometry.
+
+        The wavefunction has to be tightly converged, an accuracy of 0.001 or
+        smaller is recommended. Only available for closed-shell molecules
+        without solvation model or other external interactions.
+
+        Raises
+        ------
+        TBLiteRuntimeError
+            in case the calculation fails or is not supported
+        """
+        library.calc_hessian(self._ctx, self._mol, self._calc, res._res)
+        return res
+
+    def polarizability(self, res: Result, gradient: bool = False) -> Result:
+        """
+        Evaluate the analytic static dipole polarizability and optionally its
+        derivative with respect to the atomic positions. Both are stored in the
+        provided result container, which must hold the result of a single point
+        calculation for the current geometry.
+
+        The wavefunction has to be tightly converged, an accuracy of 0.001 or
+        smaller is recommended. Only available for closed-shell molecules
+        without solvation model or other external interactions, the derivative
+        additionally requires integer occupation numbers.
+
+        Raises
+        ------
+        TBLiteRuntimeError
+            in case the calculation fails or is not supported
+        """
+        library.calc_polarizability(self._ctx, self._mol, self._calc, res._res)
+        if gradient:
+            library.calc_polarizability_gradient(
+                self._ctx, self._mol, self._calc, res._res
+            )
+        return res
 
 
 def _cast(ctype, array):

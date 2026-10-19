@@ -43,6 +43,8 @@ module tblite_api_result
       & get_result_localized_orbital_coefficients_api, &
       & get_result_localized_orbital_centers_api, &
       & get_post_processing_dict_api
+   public :: get_result_hessian_api, get_result_dipole_gradient_api, &
+      & get_result_polarizability_api, get_result_polarizability_gradient_api
 
 
    !> Void pointer holding results of a calculation
@@ -53,6 +55,14 @@ module tblite_api_result
       real(wp), allocatable :: gradient(:, :)
       !> Virial
       real(wp), allocatable :: sigma(:, :)
+      !> Molecular Hessian
+      real(wp), allocatable :: hessian(:, :)
+      !> Derivative of the dipole moment w.r.t. the atomic positions
+      real(wp), allocatable :: dipgrad(:, :, :)
+      !> Static dipole polarizability
+      real(wp), allocatable :: alpha(:, :)
+      !> Derivative of the polarizability w.r.t. the atomic positions
+      real(wp), allocatable :: dalpha(:, :, :, :)
       !> Wavefunction
       type(wavefunction_type), allocatable :: wfn
       !> Additional results
@@ -304,6 +314,98 @@ subroutine get_result_virial_api(verror, vres, sigma) &
 
    sigma(:size(res%sigma)) = reshape(res%sigma, [size(res%sigma)])
 end subroutine get_result_virial_api
+
+
+subroutine get_result_hessian_api(verror, vres, hessian) &
+      & bind(C, name=namespace//"get_result_hessian")
+   type(c_ptr), value :: verror
+   type(vp_error), pointer :: error
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   real(c_double), intent(out) :: hessian(*)
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_result_hessian"
+
+   call get_result(verror, vres, error, res, ok)
+   if (.not.ok) return
+
+   if (.not.allocated(res%hessian)) then
+      call fatal_error(error%ptr, "Result does not contain Hessian")
+      return
+   end if
+
+   hessian(:size(res%hessian)) = reshape(res%hessian, [size(res%hessian)])
+end subroutine get_result_hessian_api
+
+
+subroutine get_result_dipole_gradient_api(verror, vres, dipgrad) &
+      & bind(C, name=namespace//"get_result_dipole_gradient")
+   type(c_ptr), value :: verror
+   type(vp_error), pointer :: error
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   real(c_double), intent(out) :: dipgrad(*)
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_result_dipole_gradient"
+
+   call get_result(verror, vres, error, res, ok)
+   if (.not.ok) return
+
+   if (.not.allocated(res%dipgrad)) then
+      call fatal_error(error%ptr, "Result does not contain dipole gradient")
+      return
+   end if
+
+   dipgrad(:size(res%dipgrad)) = reshape(res%dipgrad, [size(res%dipgrad)])
+end subroutine get_result_dipole_gradient_api
+
+
+subroutine get_result_polarizability_api(verror, vres, alpha) &
+      & bind(C, name=namespace//"get_result_polarizability")
+   type(c_ptr), value :: verror
+   type(vp_error), pointer :: error
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   real(c_double), intent(out) :: alpha(*)
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_result_polarizability"
+
+   call get_result(verror, vres, error, res, ok)
+   if (.not.ok) return
+
+   if (.not.allocated(res%alpha)) then
+      call fatal_error(error%ptr, "Result does not contain polarizability")
+      return
+   end if
+
+   alpha(:size(res%alpha)) = reshape(res%alpha, [size(res%alpha)])
+end subroutine get_result_polarizability_api
+
+
+subroutine get_result_polarizability_gradient_api(verror, vres, dalpha) &
+      & bind(C, name=namespace//"get_result_polarizability_gradient")
+   type(c_ptr), value :: verror
+   type(vp_error), pointer :: error
+   type(c_ptr), value :: vres
+   type(vp_result), pointer :: res
+   real(c_double), intent(out) :: dalpha(*)
+   logical :: ok
+
+   if (debug) print '("[Info]", 1x, a)', "get_result_polarizability_gradient"
+
+   call get_result(verror, vres, error, res, ok)
+   if (.not.ok) return
+
+   if (.not.allocated(res%dalpha)) then
+      call fatal_error(error%ptr, "Result does not contain polarizability gradient")
+      return
+   end if
+
+   dalpha(:size(res%dalpha)) = reshape(res%dalpha, [size(res%dalpha)])
+end subroutine get_result_polarizability_gradient_api
 
 
 subroutine get_result_charges_api(verror, vres, charges) &
