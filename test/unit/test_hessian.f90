@@ -28,7 +28,13 @@ module test_hessian
       & get_multipole_potential_derivative
    use tblite_hessian_polarizability, only : xtb_polarizability_gradient
    use tblite_hessian_repulsion, only : get_repulsion_hessian
+   use tblite_hessian_solvation, only : check_solvation_support
    use tblite_hessian_xtb, only : xtb_hessian
+   use tblite_partition, only : work_partition, new_work_partition
+   use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
+      & ddx_input, born_kernel, solvent_data, get_solvent_data, new_solvation, &
+      & new_solvation_cds, new_solvation_shift, solvation_type
+   use tblite_container, only : container_type
    use tblite_response_polarizability, only : xtb_polarizability
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
@@ -82,7 +88,12 @@ subroutine collect_hessian(testsuite)
       new_unittest("gfn1-polarizability-gradient", test_polgrad_gfn1), &
       new_unittest("gfn2-polarizability-gradient", test_polgrad_gfn2), &
       new_unittest("unsupported-spin", test_unsupported_spin, should_fail=.true.), &
-      new_unittest("unsupported-smearing", test_unsupported_smearing, should_fail=.true.) &
+      new_unittest("unsupported-smearing", test_unsupported_smearing, should_fail=.true.), &
+      new_unittest("solvation-support-alpb", test_solvation_support_alpb), &
+      new_unittest("solvation-support-gbsa", test_solvation_support_gbsa), &
+      new_unittest("unsupported-solvation-ddx", test_unsupported_solvation_ddx), &
+      new_unittest("unsupported-solvation-cm5", test_unsupported_solvation_cm5), &
+      new_unittest("unsupported-solvation-partition", test_unsupported_solvation_partition) &
       ]
 
 end subroutine collect_hessian
@@ -812,5 +823,191 @@ subroutine test_unsupported_spin(error)
    if (ctx%failed()) call ctx%get_error(error)
 
 end subroutine test_unsupported_spin
+
+subroutine add_solvation(calc, mol, input, method, error)
+   !***********************************
+   !* Attach the containers of a solvation input to the calculator in the
+   !* same way as the command line driver.
+   !***********************************
+   !> Single-point calculator
+   type(xtb_calculator), intent(inout) :: calc
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Solvation model input
+   type(solvation_input), intent(in) :: input
+   !> Method for parameter selection
+   character(len=*), intent(in) :: method
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   class(container_type), allocatable :: cont
+   class(solvation_type), allocatable :: solv
+
+   if (allocated(input%alpb) .or. allocated(input%ddx)) then
+      call new_solvation(solv, mol, input, error, method)
+      if (allocated(error)) return
+      call move_alloc(solv, cont)
+      call calc%push_back(cont)
+   end if
+   if (allocated(input%cds)) then
+      call new_solvation_cds(solv, mol, input, error, method)
+      if (allocated(error)) return
+      call move_alloc(solv, cont)
+      call calc%push_back(cont)
+   end if
+   if (allocated(input%shift)) then
+      call new_solvation_shift(solv, input, error, method)
+      if (allocated(error)) return
+      call move_alloc(solv, cont)
+      call calc%push_back(cont)
+   end if
+end subroutine add_solvation
+
+subroutine check_rejected(calc, error)
+   !***********************************
+   !* Expect the support check to reject the calculator, such that a failure
+   !* while setting up the test cannot pass for the rejection.
+   !***********************************
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(error_type), allocatable :: reject
+
+   call check_solvation_support(calc, reject)
+   if (.not.allocated(reject)) then
+      call test_failed(error, "Unsupported solvation was not rejected")
+   end if
+end subroutine check_rejected
+
+subroutine get_parametrized_solvation(input, alpb, kernel)
+   !> Solvation model input
+   type(solvation_input), intent(out) :: input
+   !> Use the analytical linearized Poisson-Boltzmann model
+   logical, intent(in) :: alpb
+   !> Generalized Born interaction kernel
+   integer, intent(in) :: kernel
+
+   type(solvent_data) :: solvent
+
+   solvent = get_solvent_data("water")
+   input%alpb = alpb_input(solvent%eps, solvent=solvent%solvent, kernel=kernel, alpb=alpb)
+   input%cds = cds_input(alpb=alpb, solvent=solvent%solvent)
+   input%shift = shift_input(alpb=alpb, solvent=solvent%solvent)
+end subroutine get_parametrized_solvation
+
+subroutine test_solvation_support_alpb(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .true., born_kernel%p16)
+   call add_solvation(calc, mol, input, "gfn2", error)
+   if (allocated(error)) return
+   call check_solvation_support(calc, error)
+
+end subroutine test_solvation_support_alpb
+
+subroutine test_solvation_support_gbsa(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .false., born_kernel%still)
+   call add_solvation(calc, mol, input, "gfn1", error)
+   if (allocated(error)) return
+   call check_solvation_support(calc, error)
+
+end subroutine test_solvation_support_gbsa
+
+subroutine test_unsupported_solvation_ddx(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input
+   type(solvent_data) :: solvent
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   solvent = get_solvent_data("water")
+   input%ddx = ddx_input(dielectric_const=solvent%eps)
+   call add_solvation(calc, mol, input, "gfn2", error)
+   if (allocated(error)) then
+      call test_failed(error, "Setting up the ddX container failed")
+      return
+   end if
+   call check_rejected(calc, error)
+
+end subroutine test_unsupported_solvation_ddx
+
+subroutine test_unsupported_solvation_cm5(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input, born, surface
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .true., born_kernel%p16)
+   born%alpb = input%alpb
+   surface%cds = input%cds
+   !>-- only the GFN1 parametrization shifts the charges by CM5
+   call add_solvation(calc, mol, born, "gfn1", error)
+   if (.not.allocated(error)) call add_solvation(calc, mol, surface, "gfn2", error)
+   if (allocated(error)) then
+      call test_failed(error, "Setting up the solvation containers failed")
+      return
+   end if
+   call check_rejected(calc, error)
+
+end subroutine test_unsupported_solvation_cm5
+
+subroutine test_unsupported_solvation_partition(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input
+   type(work_partition) :: partition
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .true., born_kernel%p16)
+   call add_solvation(calc, mol, input, "gfn2", error)
+   if (.not.allocated(error)) call new_work_partition(error, partition, 0, 2)
+   if (allocated(error)) then
+      call test_failed(error, "Setting up the partitioned calculator failed")
+      return
+   end if
+   call calc%set_partition(partition)
+   call check_rejected(calc, error)
+
+end subroutine test_unsupported_solvation_partition
 
 end module test_hessian

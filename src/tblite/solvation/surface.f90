@@ -30,6 +30,7 @@ module tblite_solvation_surface
    private
 
    public :: new_surface_integrator
+   public :: compute_w_spg
 
    type, public :: surface_integrator
       !> Number of angular grid points

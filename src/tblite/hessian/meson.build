@@ -23,5 +23,6 @@ srcs += files(
   'polarizability.f90',
   'reference.f90',
   'repulsion.f90',
+  'solvation.f90',
   'xtb.f90',
 )

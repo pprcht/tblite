@@ -28,6 +28,7 @@ module tblite_solvation_born
    private
 
    public :: new_born_integrator
+   public :: compute_bornr, compute_psi
 
    !> Implementation of GBOBC integrator
    type, public :: born_integrator

@@ -26,6 +26,7 @@ list(
   "${dir}/polarizability.f90"
   "${dir}/reference.f90"
   "${dir}/repulsion.f90"
+  "${dir}/solvation.f90"
   "${dir}/xtb.f90"
 )
 
