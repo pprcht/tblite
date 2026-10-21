@@ -116,11 +116,12 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
 
 end subroutine xtb_polarizability
 
-subroutine check_response_support(mol, calc, wfn, error)
+subroutine check_response_support(mol, calc, wfn, error, interactions)
    !***********************************
    !* Reject calculations outside the validity of the analytic response:
    !* open-shell, non-self-consistent, periodic, distributed, and any
-   !* additional interaction container such as implicit solvation.
+   !* additional interaction container such as implicit solvation, unless
+   !* the caller handles the interaction containers itself.
    !***********************************
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
@@ -130,6 +131,13 @@ subroutine check_response_support(mol, calc, wfn, error)
    type(wavefunction_type), intent(in) :: wfn
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> The caller checks and handles the interaction containers
+   logical, intent(in), optional :: interactions
+
+   logical :: with_interactions
+
+   with_interactions = .false.
+   if (present(interactions)) with_interactions = interactions
 
    if (wfn%nspin /= 1) then
       call fatal_error(error, "Analytic response requires a restricted wavefunction")
@@ -143,7 +151,7 @@ subroutine check_response_support(mol, calc, wfn, error)
       call fatal_error(error, "Analytic response is not available for periodic systems")
       return
    end if
-   if (allocated(calc%interactions)) then
+   if (allocated(calc%interactions) .and. .not.with_interactions) then
       call fatal_error(error, "Analytic response is not available with solvation "// &
          & "or other external interactions")
       return

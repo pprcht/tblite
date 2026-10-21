@@ -94,7 +94,14 @@ subroutine collect_hessian(testsuite)
       new_unittest("unsupported-solvation-ddx", test_unsupported_solvation_ddx), &
       new_unittest("unsupported-solvation-cm5", test_unsupported_solvation_cm5), &
       new_unittest("unsupported-solvation-partition", test_unsupported_solvation_partition), &
-      new_unittest("unsupported-solvation-duplicate", test_unsupported_solvation_duplicate) &
+      new_unittest("unsupported-solvation-duplicate", test_unsupported_solvation_duplicate), &
+      new_unittest("gfn2-hessian-alpb", test_hessian_gfn2_alpb), &
+      new_unittest("gfn2-hessian-gbsa", test_hessian_gfn2_gbsa), &
+      new_unittest("gfn1-hessian-alpb", test_hessian_gfn1_alpb), &
+      new_unittest("gfn2-hessian-alpb-charged", test_hessian_gfn2_alpb_charged), &
+      new_unittest("gfn1-dipgrad-alpb", test_dipgrad_gfn1_alpb), &
+      new_unittest("unsupported-polarizability-solvation", &
+         & test_unsupported_polarizability_solvation) &
       ]
 
 end subroutine collect_hessian
@@ -1034,5 +1041,141 @@ subroutine test_unsupported_solvation_duplicate(error)
    call check_rejected(calc, error)
 
 end subroutine test_unsupported_solvation_duplicate
+
+subroutine get_solvated_calculator(calc, mol, method, alpb, kernel, error)
+   !> Single-point calculator
+   type(xtb_calculator), intent(out) :: calc
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Method for parameter selection
+   character(len=*), intent(in) :: method
+   !> Use the analytical linearized Poisson-Boltzmann model
+   logical, intent(in) :: alpb
+   !> Generalized Born interaction kernel
+   integer, intent(in) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(solvation_input) :: input
+
+   select case(method)
+   case("gfn1")
+      call new_gfn1_calculator(calc, mol, error)
+   case default
+      call new_gfn2_calculator(calc, mol, error)
+   end select
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, alpb, kernel)
+   call add_solvation(calc, mol, input, method, error)
+end subroutine get_solvated_calculator
+
+subroutine test_hessian_gfn2_alpb(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "bih3_nh3")
+   call get_solvated_calculator(calc, mol, "gfn2", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn2_alpb
+
+subroutine test_hessian_gfn2_gbsa(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   !>-- the surface area is only once continuously differentiable, for bih3_nh3
+   !>   a grid point lies within the finite difference step of such a point
+   call get_structure(mol, "Heavy28", "sbh3_hcl")
+   call get_solvated_calculator(calc, mol, "gfn2", .false., born_kernel%still, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn2_gbsa
+
+subroutine test_hessian_gfn1_alpb(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "sbh3_h2o")
+   call get_solvated_calculator(calc, mol, "gfn1", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn1_alpb
+
+subroutine test_hessian_gfn2_alpb_charged(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   !>-- a closed shell cation, the shape correction depends on the total charge
+   call get_structure(mol, "Heavy28", "bih3_nh3")
+   mol%charge = 2.0_wp
+   call get_solvated_calculator(calc, mol, "gfn2", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+   call test_hessian_gen(error, mol, calc, kt)
+
+end subroutine test_hessian_gfn2_alpb_charged
+
+subroutine test_dipgrad_gfn1_alpb(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "pbh4_h2o")
+   call get_solvated_calculator(calc, mol, "gfn1", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+   call test_dipgrad_gen(error, mol, calc)
+
+end subroutine test_dipgrad_gfn1_alpb
+
+subroutine test_unsupported_polarizability_solvation(error)
+   !***********************************
+   !* The field response does not include the solvation kernel.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(context_type) :: ctx
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(wavefunction_type) :: wfn
+   real(wp) :: energy, alpha(3, 3)
+
+   call get_structure(mol, "MB16-43", "01")
+   call get_solvated_calculator(calc, mol, "gfn2", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
+   if (ctx%failed()) then
+      call ctx%get_error(error)
+      return
+   end if
+
+   call xtb_polarizability(ctx, mol, calc, wfn, alpha)
+   if (.not.ctx%failed()) then
+      call test_failed(error, "Polarizability with solvation was not rejected")
+   end if
+
+end subroutine test_unsupported_polarizability_solvation
 
 end module test_hessian

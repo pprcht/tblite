@@ -87,6 +87,7 @@ subroutine collect_hessian_solvation(testsuite)
       new_unittest("kernel-gfn1-gbsa", test_kernel_gfn1_gbsa), &
       new_unittest("potential-gfn2-alpb", test_potential_gfn2_alpb), &
       new_unittest("potential-gfn1-alpb", test_potential_gfn1_alpb), &
+      new_unittest("potential-gfn2-gbsa", test_potential_gfn2_gbsa), &
       new_unittest("hessian-gfn2-alpb", test_hessian_gfn2_alpb), &
       new_unittest("hessian-gfn2-gbsa", test_hessian_gfn2_gbsa), &
       new_unittest("hessian-gfn1-alpb", test_hessian_gfn1_alpb) &
@@ -696,6 +697,13 @@ subroutine test_potential_gfn1_alpb(error)
 
    call test_potential_gen(error, "gfn1", .true., born_kernel%p16)
 end subroutine test_potential_gfn1_alpb
+
+subroutine test_potential_gfn2_gbsa(error)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   call test_potential_gen(error, "gfn2", .false., born_kernel%still)
+end subroutine test_potential_gfn2_gbsa
 
 
 subroutine test_hessian_gen(error, method, alpb, kernel, charge)

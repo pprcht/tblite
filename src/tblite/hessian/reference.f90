@@ -30,6 +30,8 @@ module tblite_hessian_reference
    use tblite_hessian_dispersion, only : get_dispersion_potential_derivative
    use tblite_hessian_hamiltonian, only : get_scaled_overlap, get_hamiltonian_derivative
    use tblite_hessian_multipole, only : get_multipole_potential_derivative
+   use tblite_hessian_solvation, only : solvation_kernel, new_solvation_kernel, &
+      & get_solvation_potential, get_solvation_potential_derivative
    use tblite_integral_type, only : integral_type, new_integral
    use tblite_response_integral, only : get_overlap_derivative, get_multipole_derivative
    use tblite_response_kernel, only : has_dispersion_kernel
@@ -70,6 +72,8 @@ module tblite_hessian_reference
       real(wp), allocatable :: dvdp(:, :, :, :), dvqp(:, :, :, :)
       !> Gradient of the core Hamiltonian contracted with the converged density
       real(wp), allocatable :: gradient(:, :), dEdcn(:)
+      !> Implicit solvation models of the interaction containers
+      type(solvation_kernel) :: solv
    end type reference_data
 
 contains
@@ -93,7 +97,7 @@ subroutine new_reference_data(ref, mol, calc, wfn, error)
    integer :: nat, nao, nsh
    logical :: multipoles
    real(wp) :: sigma(3, 3)
-   real(wp), allocatable :: cn(:), dcndL(:, :, :), h1(:, :, :), dvat(:, :, :)
+   real(wp), allocatable :: cn(:), dcndL(:, :, :), h1(:, :, :), dvat(:, :, :), vat(:)
    real(wp), allocatable :: zero(:, :, :)
    type(container_cache) :: ccache, dcache
 
@@ -129,6 +133,13 @@ subroutine new_reference_data(ref, mol, calc, wfn, error)
    if (has_dispersion_kernel(calc)) then
       call calc%dispersion%get_potential(mol, dcache, wfn, ref%pot)
    end if
+   if (allocated(calc%interactions)) then
+      call new_solvation_kernel(ref%solv, mol, calc, error)
+      if (allocated(error)) return
+      allocate(vat(nat))
+      call get_solvation_potential(ref%solv, wfn%qat(:, 1), vat)
+      ref%pot%vat(:, 1) = ref%pot%vat(:, 1) + vat
+   end if
    allocate(h1(nao, nao, 1))
    call add_pot_to_h1(calc%bas, ref%ints, ref%pot, h1)
    call new_potential(ref%pot_zero, mol, calc%bas, 1)
@@ -150,6 +161,10 @@ subroutine new_reference_data(ref, mol, calc, wfn, error)
       if (allocated(error)) then
          return
       end if
+      call add_atomic_potential_derivative(calc, dvat, ref%dvshdr)
+   end if
+   if (allocated(calc%interactions)) then
+      call get_solvation_potential_derivative(ref%solv, mol, wfn%qat(:, 1), dvat)
       call add_atomic_potential_derivative(calc, dvat, ref%dvshdr)
    end if
 
