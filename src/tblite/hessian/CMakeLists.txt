@@ -13,6 +13,8 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 
+add_subdirectory("solvation")
+
 set(dir "${CMAKE_CURRENT_SOURCE_DIR}")
 
 list(

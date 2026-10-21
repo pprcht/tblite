@@ -34,6 +34,7 @@ program tester
    use test_hamiltonian, only : collect_hamiltonian
    use test_hdf5, only : collect_hdf5
    use test_hessian, only : collect_hessian
+   use test_hessian_solvation, only : collect_hessian_solvation
    use test_integral_multipole, only : collect_integral_multipole
    use test_integral_overlap, only : collect_integral_overlap
    use test_integral_trafo, only : collect_integral_trafo
@@ -72,6 +73,7 @@ program tester
       new_testsuite("fit", collect_fit), &
       new_testsuite("repulsion", collect_repulsion), &
       new_testsuite("hessian", collect_hessian), &
+      new_testsuite("hessian-solvation", collect_hessian_solvation), &
       new_testsuite("response", collect_response), &
       new_testsuite("npy", collect_npy), &
       new_testsuite("npz", collect_npz), &
