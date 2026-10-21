@@ -709,8 +709,9 @@ class Calculator(Structure):
         for the current geometry.
 
         The wavefunction has to be tightly converged, an accuracy of 0.001 or
-        smaller is recommended. Only available for closed-shell molecules
-        without solvation model or other external interactions.
+        smaller is recommended. Only available for closed-shell molecules.
+        The ALPB, GBSA, GBE and GB solvation models are supported, ddX models
+        and other external interactions are not.
 
         Raises
         ------

@@ -1,0 +1,7 @@
+run
+--method
+gfn2
+--alpb
+water
+--hess
+$ORIGIN/10-h2co.xyz

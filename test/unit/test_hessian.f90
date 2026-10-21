@@ -34,7 +34,7 @@ module test_hessian
    use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
       & ddx_input, born_kernel, solvent_data, get_solvent_data, new_solvation, &
       & new_solvation_cds, new_solvation_shift, solvation_type
-   use tblite_container, only : container_type
+   use tblite_container, only : container_type, container_list
    use tblite_response_polarizability, only : xtb_polarizability
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
@@ -100,6 +100,7 @@ subroutine collect_hessian(testsuite)
       new_unittest("gfn1-hessian-alpb", test_hessian_gfn1_alpb), &
       new_unittest("gfn2-hessian-alpb-charged", test_hessian_gfn2_alpb_charged), &
       new_unittest("gfn1-dipgrad-alpb", test_dipgrad_gfn1_alpb), &
+      new_unittest("gfn2-hessian-alpb-nested", test_hessian_gfn2_alpb_nested), &
       new_unittest("unsupported-polarizability-solvation", &
          & test_unsupported_polarizability_solvation) &
       ]
@@ -1147,6 +1148,76 @@ subroutine test_dipgrad_gfn1_alpb(error)
    call test_dipgrad_gen(error, mol, calc)
 
 end subroutine test_dipgrad_gfn1_alpb
+
+subroutine test_hessian_gfn2_alpb_nested(error)
+   !***********************************
+   !* The C API adds a solvation model as one container holding a list of
+   !* the Born, surface and shift contributions, which must give the same
+   !* Hessian as the containers added one by one.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc_flat, calc_nested
+   type(solvation_input) :: input
+   class(container_type), allocatable :: cont
+   class(solvation_type), allocatable :: solv
+   type(container_list), allocatable :: list
+   real(wp), allocatable :: hflat(:, :), hnested(:, :)
+
+   call get_structure(mol, "Heavy28", "bih3_nh3")
+   call get_solvated_calculator(calc_flat, mol, "gfn2", .true., born_kernel%p16, error)
+   if (allocated(error)) return
+
+   call new_gfn2_calculator(calc_nested, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .true., born_kernel%p16)
+   allocate(list)
+   call new_solvation(solv, mol, input, error, "gfn2")
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call list%push_back(cont)
+   call new_solvation_cds(solv, mol, input, error, "gfn2")
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call list%push_back(cont)
+   call new_solvation_shift(solv, input, error, "gfn2")
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call list%push_back(cont)
+   call move_alloc(list, cont)
+   call calc_nested%push_back(cont)
+
+   allocate(hflat(3*mol%nat, 3*mol%nat), hnested(3*mol%nat, 3*mol%nat))
+   call get_analytic_hessian(calc_flat, hflat, error)
+   if (allocated(error)) return
+   call get_analytic_hessian(calc_nested, hnested, error)
+   if (allocated(error)) return
+
+   if (any(abs(hflat - hnested) > thr)) then
+      call test_failed(error, "Nested solvation containers change the Hessian")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(hflat - hnested))
+   end if
+
+contains
+
+   subroutine get_analytic_hessian(calc, hessian, error)
+      type(xtb_calculator), intent(in) :: calc
+      real(wp), intent(out) :: hessian(:, :)
+      type(error_type), allocatable, intent(out) :: error
+
+      type(context_type) :: ctx
+      type(wavefunction_type) :: wfn
+      real(wp) :: energy
+
+      call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+      call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
+      if (.not.ctx%failed()) call xtb_hessian(ctx, mol, calc, wfn, hessian)
+      if (ctx%failed()) call ctx%get_error(error)
+   end subroutine get_analytic_hessian
+
+end subroutine test_hessian_gfn2_alpb_nested
 
 subroutine test_unsupported_polarizability_solvation(error)
    !***********************************

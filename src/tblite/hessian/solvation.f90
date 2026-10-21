@@ -31,7 +31,7 @@ module tblite_hessian_solvation
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
    use tblite_blas, only : gemm, symv
-   use tblite_container, only : container_type
+   use tblite_container, only : container_type, container_list
    use tblite_hessian_solvation_born, only : add_born_radii_hessian
    use tblite_hessian_solvation_cm5, only : add_cm5_hessian
    use tblite_hessian_solvation_coupling, only : add_born_coupling_hessian
@@ -52,6 +52,11 @@ module tblite_hessian_solvation
    public :: solvation_kernel, new_solvation_kernel
    public :: get_solvation_potential, get_solvation_potential_derivative
    public :: get_solvation_hessian
+
+   !> Copy of an interaction container
+   type :: container_leaf
+      class(container_type), allocatable :: raw
+   end type container_leaf
 
    !> Geometry dependent quantities of the solvation models for one structure
    type :: solvation_kernel
@@ -93,7 +98,7 @@ subroutine check_solvation_support(calc, error)
 
    integer :: ic, nborn, ncds
    logical :: has_cm5, use_cm5
-   class(container_type), allocatable :: cont
+   type(container_leaf), allocatable :: leaves(:)
 
    if (.not.allocated(calc%interactions)) return
    if (.not.(calc%interactions%partition == serial_work_partition)) then
@@ -107,8 +112,9 @@ subroutine check_solvation_support(calc, error)
    use_cm5 = .false.
    nborn = 0
    ncds = 0
-   do ic = 1, calc%interactions%get_size()
-      call calc%interactions%get_container(ic, cont)
+   call get_leaf_containers(calc%interactions, leaves)
+   do ic = 1, size(leaves)
+      associate(cont => leaves(ic)%raw)
       if (.not.(cont%partition == serial_work_partition)) then
          call fatal_error(error, "Analytic second derivatives with solvation require "// &
             & "a serial calculation")
@@ -133,6 +139,7 @@ subroutine check_solvation_support(calc, error)
             & "the interaction '"//container_label(cont)//"'")
          return
       end select
+      end associate
       if (allocated(error)) return
    end do
    if (nborn > 1 .or. ncds > 1) then
@@ -155,6 +162,59 @@ contains
    end subroutine check_cm5
 
 end subroutine check_solvation_support
+
+subroutine get_leaf_containers(list, leaves)
+   !***********************************
+   !* Copies of all containers in a list, with nested lists, like the ones
+   !* created by the C API for a solvation model, replaced by their content.
+   !***********************************
+   !> List of interaction containers
+   class(container_list), intent(in) :: list
+   !> Copies of the containers which are not lists themselves
+   type(container_leaf), allocatable, intent(out) :: leaves(:)
+
+   integer :: nleaf
+
+   allocate(leaves(list%get_size()))
+   nleaf = 0
+   call add_leaf_containers(list, leaves, nleaf)
+   leaves = leaves(:nleaf)
+end subroutine get_leaf_containers
+
+recursive subroutine add_leaf_containers(list, leaves, nleaf)
+   !> List of interaction containers
+   class(container_list), intent(in) :: list
+   !> Copies of the containers which are not lists themselves
+   type(container_leaf), allocatable, intent(inout) :: leaves(:)
+   !> Number of collected containers
+   integer, intent(inout) :: nleaf
+
+   integer :: ic, il
+   logical :: nested
+   class(container_type), allocatable :: cont
+   type(container_leaf), allocatable :: tmp(:)
+
+   do ic = 1, list%get_size()
+      call list%get_container(ic, cont)
+      nested = .false.
+      select type(cont)
+      class is(container_list)
+         nested = .true.
+         call add_leaf_containers(cont, leaves, nleaf)
+      end select
+      if (nested) cycle
+
+      if (nleaf >= size(leaves)) then
+         allocate(tmp(2*size(leaves) + 1))
+         do il = 1, nleaf
+            call move_alloc(leaves(il)%raw, tmp(il)%raw)
+         end do
+         call move_alloc(tmp, leaves)
+      end if
+      nleaf = nleaf + 1
+      call move_alloc(cont, leaves(nleaf)%raw)
+   end do
+end subroutine add_leaf_containers
 
 function container_label(cont) result(label)
    !> Interaction container
@@ -186,15 +246,15 @@ subroutine new_solvation_kernel(self, mol, calc, error)
    integer :: nat, ic, iat
    real(wp) :: adet
    real(wp), allocatable :: qunit(:)
-   class(container_type), allocatable :: cont
+   type(container_leaf), allocatable :: leaves(:)
 
    call check_solvation_support(calc, error)
    if (allocated(error)) return
    if (.not.allocated(calc%interactions)) return
 
-   do ic = 1, calc%interactions%get_size()
-      call calc%interactions%get_container(ic, cont)
-      select type(cont)
+   call get_leaf_containers(calc%interactions, leaves)
+   do ic = 1, size(leaves)
+      select type(cont => leaves(ic)%raw)
       type is(alpb_solvation)
          allocate(self%born, source=cont)
          self%use_cm5 = cont%useCM5
