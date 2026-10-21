@@ -93,7 +93,8 @@ subroutine collect_hessian(testsuite)
       new_unittest("solvation-support-gbsa", test_solvation_support_gbsa), &
       new_unittest("unsupported-solvation-ddx", test_unsupported_solvation_ddx), &
       new_unittest("unsupported-solvation-cm5", test_unsupported_solvation_cm5), &
-      new_unittest("unsupported-solvation-partition", test_unsupported_solvation_partition) &
+      new_unittest("unsupported-solvation-partition", test_unsupported_solvation_partition), &
+      new_unittest("unsupported-solvation-duplicate", test_unsupported_solvation_duplicate) &
       ]
 
 end subroutine collect_hessian
@@ -1009,5 +1010,29 @@ subroutine test_unsupported_solvation_partition(error)
    call check_rejected(calc, error)
 
 end subroutine test_unsupported_solvation_partition
+
+subroutine test_unsupported_solvation_duplicate(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(solvation_input) :: input, born
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call get_parametrized_solvation(input, .true., born_kernel%p16)
+   born%alpb = input%alpb
+   call add_solvation(calc, mol, born, "gfn2", error)
+   if (.not.allocated(error)) call add_solvation(calc, mol, born, "gfn2", error)
+   if (allocated(error)) then
+      call test_failed(error, "Setting up the solvation containers failed")
+      return
+   end if
+   call check_rejected(calc, error)
+
+end subroutine test_unsupported_solvation_duplicate
 
 end module test_hessian
