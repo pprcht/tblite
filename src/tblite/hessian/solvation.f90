@@ -51,6 +51,7 @@ module tblite_hessian_solvation
    public :: check_solvation_support
    public :: solvation_kernel, new_solvation_kernel
    public :: get_solvation_potential, get_solvation_potential_derivative
+   public :: get_solvation_kernel_derivative
    public :: get_solvation_hessian
 
    !> Copy of an interaction container
@@ -350,9 +351,6 @@ subroutine get_solvation_potential_derivative(self, mol, qat, dvat)
    !* Derivative of the atom-resolved solvation potential w.r.t. the atomic
    !* positions at fixed charges q, dvat(A, c, B) = dv_A/dR_cB,
    !*   dv/dR = dK/dR Q + K dc/dR.
-   !* The Born matrix depends on the positions directly and via the Born
-   !* radii, whose contribution is collected in W_AX = sum_B dJ_AB/da_X Q_B
-   !* and contracted once with the Jacobian of the radii.
    !***********************************
    !> Geometry dependent quantities of the solvation models
    type(solvation_kernel), intent(in) :: self
@@ -363,20 +361,50 @@ subroutine get_solvation_potential_derivative(self, mol, qat, dvat)
    !> Derivative of the atom-resolved potential
    real(wp), intent(out) :: dvat(:, :, :)
 
-   integer :: nat, iat, jat
-   real(wp) :: vec(3), r1, ehat(3), rho, da, db, daa, dab, dbb
-   real(wp) :: dr, drho, drr, drrho, drhorho, qtot
-   real(wp), allocatable :: qeff(:), wmat(:, :), dvflat(:, :)
+   integer :: nat
+   real(wp), allocatable :: qeff(:), dvflat(:, :)
 
    nat = mol%nat
    allocate(qeff(size(qat)))
    qeff(:) = get_shifted_charges(self, qat)
-   allocate(dvflat(nat, 3*nat), source=0.0_wp)
+   call get_solvation_kernel_derivative(self, mol, qeff, dvat)
+
+   if (self%use_cm5) then
+      allocate(dvflat(nat, 3*nat))
+      call gemm(self%kmat, reshape(self%dcm5dr, [3*nat, nat]), dvflat, transb="t")
+      dvat(:, :, :) = dvat + reshape(dvflat, [nat, 3, nat])
+   end if
+end subroutine get_solvation_potential_derivative
+
+subroutine get_solvation_kernel_derivative(self, mol, xat, dvat)
+   !***********************************
+   !* Derivative of the response kernel w.r.t. the atomic positions applied
+   !* to atomic charges x, dvat(A, c, B) = sum_C dK_AC/dR_cB x_C.
+   !* The Born matrix depends on the positions directly and via the Born
+   !* radii, whose contribution is collected in W_AX = sum_C dJ_AC/da_X x_C
+   !* and contracted once with the Jacobian of the radii.
+   !***********************************
+   !> Geometry dependent quantities of the solvation models
+   type(solvation_kernel), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Atomic charges the kernel acts on
+   real(wp), intent(in) :: xat(:)
+   !> Derivative of the kernel applied to the charges
+   real(wp), intent(out) :: dvat(:, :, :)
+
+   integer :: nat, iat, jat
+   real(wp) :: vec(3), r1, ehat(3), rho, da, db, daa, dab, dbb
+   real(wp) :: dr, drho, drr, drrho, drhorho, xtot
+   real(wp), allocatable :: wmat(:, :), dvflat(:, :)
+
+   nat = mol%nat
    dvat(:, :, :) = 0.0_wp
 
    if (allocated(self%born)) then
       associate(born => self%born)
          allocate(wmat(nat, nat), source=0.0_wp)
+         allocate(dvflat(nat, 3*nat))
          do iat = 1, nat
             do jat = 1, iat - 1
                vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat)
@@ -386,22 +414,23 @@ subroutine get_solvation_potential_derivative(self, mol, qat, dvat)
                   & rho, da, db, daa, dab, dbb)
                call get_kernel_derivs(born%kernel, r1, rho, dr, drho, drr, drrho, drhorho)
                dr = born%keps*dr
-               dvat(iat, :, iat) = dvat(iat, :, iat) + dr*qeff(jat)*ehat
-               dvat(iat, :, jat) = dvat(iat, :, jat) - dr*qeff(jat)*ehat
-               dvat(jat, :, iat) = dvat(jat, :, iat) + dr*qeff(iat)*ehat
-               dvat(jat, :, jat) = dvat(jat, :, jat) - dr*qeff(iat)*ehat
-               wmat(iat, iat) = wmat(iat, iat) + born%keps*drho*da*qeff(jat)
-               wmat(iat, jat) = wmat(iat, jat) + born%keps*drho*db*qeff(jat)
-               wmat(jat, iat) = wmat(jat, iat) + born%keps*drho*da*qeff(iat)
-               wmat(jat, jat) = wmat(jat, jat) + born%keps*drho*db*qeff(iat)
+               dvat(iat, :, iat) = dvat(iat, :, iat) + dr*xat(jat)*ehat
+               dvat(iat, :, jat) = dvat(iat, :, jat) - dr*xat(jat)*ehat
+               dvat(jat, :, iat) = dvat(jat, :, iat) + dr*xat(iat)*ehat
+               dvat(jat, :, jat) = dvat(jat, :, jat) - dr*xat(iat)*ehat
+               wmat(iat, iat) = wmat(iat, iat) + born%keps*drho*da*xat(jat)
+               wmat(iat, jat) = wmat(iat, jat) + born%keps*drho*db*xat(jat)
+               wmat(jat, iat) = wmat(jat, iat) + born%keps*drho*da*xat(iat)
+               wmat(jat, jat) = wmat(jat, jat) + born%keps*drho*db*xat(iat)
             end do
-            wmat(iat, iat) = wmat(iat, iat) - born%keps*qeff(iat)/self%rad(iat)**2
+            wmat(iat, iat) = wmat(iat, iat) - born%keps*xat(iat)/self%rad(iat)**2
          end do
          call gemm(wmat, reshape(self%draddr, [3*nat, nat]), dvflat, transb="t")
+         dvat(:, :, :) = dvat + reshape(dvflat, [nat, 3, nat])
 
-         qtot = sum(qeff)
+         xtot = sum(xat)
          do iat = 1, nat
-            dvat(iat, :, :) = dvat(iat, :, :) + qtot*self%dkshape
+            dvat(iat, :, :) = dvat(iat, :, :) + xtot*self%dkshape
          end do
       end associate
    end if
@@ -409,17 +438,10 @@ subroutine get_solvation_potential_derivative(self, mol, qat, dvat)
    if (allocated(self%hbond)) then
       do iat = 1, nat
          dvat(iat, :, :) = dvat(iat, :, :) &
-            & + 2*self%hbond(iat)*qeff(iat)*self%dsdr(:, :, iat)
+            & + 2*self%hbond(iat)*xat(iat)*self%dsdr(:, :, iat)
       end do
    end if
-
-   if (self%use_cm5) then
-      call gemm(self%kmat, reshape(self%dcm5dr, [3*nat, nat]), dvflat, transb="t", &
-         & beta=1.0_wp)
-   end if
-
-   dvat(:, :, :) = dvat + reshape(dvflat, [nat, 3, nat])
-end subroutine get_solvation_potential_derivative
+end subroutine get_solvation_kernel_derivative
 
 subroutine get_solvation_hessian(self, mol, qat, hessian)
    !***********************************

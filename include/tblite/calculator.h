@@ -290,7 +290,8 @@ tblite_get_hessian(tblite_context ctx,
 
 /// Evaluate analytic static dipole polarizability.
 /// Requires the result of a tightly converged single point calculation
-/// for a closed-shell molecule without solvation model.
+/// for a closed-shell molecule. The ALPB and GBSA solvation models are
+/// supported, ddX models are not.
 ///
 /// @param ctx: Context handle
 /// @param mol: Molecular structure data
@@ -304,8 +305,8 @@ tblite_get_polarizability(tblite_context ctx,
 
 /// Evaluate analytic derivative of the polarizability with respect to the
 /// atomic positions. Requires the result of a tightly converged single point
-/// calculation with integer occupation numbers for a closed-shell molecule
-/// without solvation model.
+/// calculation with integer occupation numbers for a closed-shell molecule.
+/// The ALPB and GBSA solvation models are supported, ddX models are not.
 ///
 /// @param ctx: Context handle
 /// @param mol: Molecular structure data

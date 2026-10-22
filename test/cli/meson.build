@@ -68,6 +68,7 @@ run_testcases = [
   '10b-gfn2xtb-polgrad',
   '10c-gfn2xtb-alpb-hess',
   '10d-gfn1xtb-gbsa-hess',
+  '10e-gfn2xtb-alpb-polgrad',
 ]
 foreach case: run_testcases
   test(
@@ -82,21 +83,6 @@ foreach case: run_testcases
     timeout: 300,
   )
 endforeach
-
-# The derivative of the polarizability does not include implicit solvation
-test(
-  'polgrad-alpb',
-  tblite_exe,
-  should_fail: true,
-  args: [
-    'run',
-    '--no-restart',
-    '--alpb', 'water',
-    '--polgrad',
-    files('10-h2co.xyz'),
-  ],
-  suite: 'cli',
-)
 
 test(
   'tagdiff-example',

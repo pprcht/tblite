@@ -26,6 +26,7 @@ module tblite_response_polarizability
    use tblite_container, only : container_cache
    use tblite_context, only : context_type
    use tblite_cutoff, only : get_lattice_points
+   use tblite_hessian_solvation, only : solvation_kernel, new_solvation_kernel
    use tblite_integral_type, only : integral_type, new_integral
    use tblite_partition, only : serial_work_partition, operator(==)
    use tblite_response_field, only : xtb_field_response
@@ -68,11 +69,16 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
    type(adjacency_list) :: list
    type(potential_type) :: pot
    type(wavefunction_type) :: wfn_r
+   type(solvation_kernel) :: solv
    type(error_type), allocatable :: error
 
    alpha(:, :) = 0.0_wp
 
    call check_response_support(mol, calc, wfn, error)
+   !>-- implicit solvation enters the field response only via its charge kernel
+   if (.not.allocated(error) .and. allocated(calc%interactions)) then
+      call new_solvation_kernel(solv, mol, calc, error)
+   end if
    if (allocated(error)) then
       call ctx%set_error(error)
       return
@@ -103,7 +109,7 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
 
    do idir = 1, 3
       call xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh, pot, &
-         & wfn_r, error)
+         & wfn_r, error, kat=solv%kmat)
       if (allocated(error)) then
          call ctx%set_error(error)
          return
@@ -116,12 +122,11 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
 
 end subroutine xtb_polarizability
 
-subroutine check_response_support(mol, calc, wfn, error, interactions)
+subroutine check_response_support(mol, calc, wfn, error)
    !***********************************
    !* Reject calculations outside the validity of the analytic response:
-   !* open-shell, non-self-consistent, periodic, distributed, and any
-   !* additional interaction container such as implicit solvation, unless
-   !* the caller handles the interaction containers itself.
+   !* open-shell, non-self-consistent, periodic and distributed. Interaction
+   !* containers are checked when collecting the implicit solvation models.
    !***********************************
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
@@ -131,13 +136,6 @@ subroutine check_response_support(mol, calc, wfn, error, interactions)
    type(wavefunction_type), intent(in) :: wfn
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
-   !> The caller checks and handles the interaction containers
-   logical, intent(in), optional :: interactions
-
-   logical :: with_interactions
-
-   with_interactions = .false.
-   if (present(interactions)) with_interactions = interactions
 
    if (wfn%nspin /= 1) then
       call fatal_error(error, "Analytic response requires a restricted wavefunction")
@@ -149,11 +147,6 @@ subroutine check_response_support(mol, calc, wfn, error, interactions)
    end if
    if (any(mol%periodic)) then
       call fatal_error(error, "Analytic response is not available for periodic systems")
-      return
-   end if
-   if (allocated(calc%interactions) .and. .not.with_interactions) then
-      call fatal_error(error, "Analytic response is not available with solvation "// &
-         & "or other external interactions")
       return
    end if
    if (.not.(calc%partition == serial_work_partition)) then

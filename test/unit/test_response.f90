@@ -24,6 +24,9 @@ module test_response
    use tblite_context_type, only : context_type
    use tblite_external_field, only : electric_field
    use tblite_response_polarizability, only : xtb_polarizability
+   use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
+      & solvent_data, get_solvent_data, new_solvation, new_solvation_cds, &
+      & new_solvation_shift, solvation_type, born_kernel
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
    use tblite_xtb_gfn1, only : new_gfn1_calculator
@@ -50,13 +53,15 @@ subroutine collect_response(testsuite)
       new_unittest("gfn1-polarizability", test_alpha_gfn1), &
       new_unittest("gfn2-polarizability", test_alpha_gfn2), &
       new_unittest("gfn2-polarizability-smearing", test_alpha_gfn2_smearing), &
+      new_unittest("gfn2-polarizability-alpb", test_alpha_gfn2_alpb), &
+      new_unittest("gfn1-polarizability-gbsa", test_alpha_gfn1_gbsa), &
       new_unittest("unsupported-interaction", test_unsupported, should_fail=.true.) &
       ]
 
 end subroutine collect_response
 
 
-subroutine test_polarizability_gen(error, mol, method, etemp)
+subroutine test_polarizability_gen(error, mol, method, etemp, alpb)
    !***********************************
    !* Compare the analytic polarizability against central finite differences
    !* of the dipole moment in a homogeneous electric field.
@@ -69,6 +74,8 @@ subroutine test_polarizability_gen(error, mol, method, etemp)
    character(len=*), intent(in) :: method
    !> Electronic temperature
    real(wp), intent(in) :: etemp
+   !> Add the parametrized ALPB (true) or GBSA (false) model for water
+   logical, intent(in), optional :: alpb
 
    type(context_type) :: ctx
    type(xtb_calculator) :: calc
@@ -82,6 +89,10 @@ subroutine test_polarizability_gen(error, mol, method, etemp)
 
    call new_calculator(calc, mol, method, error)
    if (allocated(error)) return
+   if (present(alpb)) then
+      call add_water_solvation(calc, mol, method, alpb, error)
+      if (allocated(error)) return
+   end if
    call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, etemp)
 
    call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
@@ -140,6 +151,47 @@ subroutine new_calculator(calc, mol, method, error)
    end select
 end subroutine new_calculator
 
+subroutine add_water_solvation(calc, mol, method, alpb, error)
+   !***********************************
+   !* Attach the parametrized solvation models for water like the command
+   !* line driver, ALPB with the P16 kernel or GBSA with the Still kernel.
+   !***********************************
+   !> Single-point calculator
+   type(xtb_calculator), intent(inout) :: calc
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Name of the method, gfn1 or gfn2
+   character(len=*), intent(in) :: method
+   !> Use the analytical linearized Poisson-Boltzmann model
+   logical, intent(in) :: alpb
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(solvation_input) :: input
+   type(solvent_data) :: solvent
+   class(container_type), allocatable :: cont
+   class(solvation_type), allocatable :: solv
+
+   solvent = get_solvent_data("water")
+   input%alpb = alpb_input(solvent%eps, solvent=solvent%solvent, &
+      & kernel=merge(born_kernel%p16, born_kernel%still, alpb), alpb=alpb)
+   input%cds = cds_input(alpb=alpb, solvent=solvent%solvent)
+   input%shift = shift_input(alpb=alpb, solvent=solvent%solvent)
+
+   call new_solvation(solv, mol, input, error, method)
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call calc%push_back(cont)
+   call new_solvation_cds(solv, mol, input, error, method)
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call calc%push_back(cont)
+   call new_solvation_shift(solv, input, error, method)
+   if (allocated(error)) return
+   call move_alloc(solv, cont)
+   call calc%push_back(cont)
+end subroutine add_water_solvation
+
 subroutine test_alpha_gfn1(error)
 
    !> Error handling
@@ -175,6 +227,30 @@ subroutine test_alpha_gfn2_smearing(error)
    call test_polarizability_gen(error, mol, "gfn2", 0.02_wp)
 
 end subroutine test_alpha_gfn2_smearing
+
+subroutine test_alpha_gfn2_alpb(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+
+   call get_structure(mol, "MB16-43", "04")
+   call test_polarizability_gen(error, mol, "gfn2", kt, alpb=.true.)
+
+end subroutine test_alpha_gfn2_alpb
+
+subroutine test_alpha_gfn1_gbsa(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+
+   call get_structure(mol, "MB16-43", "03")
+   call test_polarizability_gen(error, mol, "gfn1", kt, alpb=.false.)
+
+end subroutine test_alpha_gfn1_gbsa
 
 subroutine test_unsupported(error)
 

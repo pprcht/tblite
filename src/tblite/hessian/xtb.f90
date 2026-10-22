@@ -90,7 +90,7 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
    hessian(:, :) = 0.0_wp
    if (dipole) dipgrad(:, :, :) = 0.0_wp
 
-   call check_response_support(mol, calc, wfn, error, interactions=.true.)
+   call check_response_support(mol, calc, wfn, error)
    if (.not.allocated(error)) call check_hessian_support(calc, error)
    if (allocated(error)) then
       call ctx%set_error(error)

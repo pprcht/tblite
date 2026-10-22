@@ -101,8 +101,8 @@ subroutine collect_hessian(testsuite)
       new_unittest("gfn2-hessian-alpb-charged", test_hessian_gfn2_alpb_charged), &
       new_unittest("gfn1-dipgrad-alpb", test_dipgrad_gfn1_alpb), &
       new_unittest("gfn2-hessian-alpb-nested", test_hessian_gfn2_alpb_nested), &
-      new_unittest("unsupported-polarizability-solvation", &
-         & test_unsupported_polarizability_solvation) &
+      new_unittest("gfn2-polarizability-gradient-alpb", test_polgrad_gfn2_alpb), &
+      new_unittest("gfn1-polarizability-gradient-gbsa", test_polgrad_gfn1_gbsa) &
       ]
 
 end subroutine collect_hessian
@@ -1219,34 +1219,34 @@ contains
 
 end subroutine test_hessian_gfn2_alpb_nested
 
-subroutine test_unsupported_polarizability_solvation(error)
-   !***********************************
-   !* The field response does not include the solvation kernel.
-   !***********************************
+subroutine test_polgrad_gfn2_alpb(error)
+
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   type(context_type) :: ctx
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
-   type(wavefunction_type) :: wfn
-   real(wp) :: energy, alpha(3, 3)
 
-   call get_structure(mol, "MB16-43", "01")
+   call get_structure(mol, "Heavy28", "teh2_hcl")
    call get_solvated_calculator(calc, mol, "gfn2", .true., born_kernel%p16, error)
    if (allocated(error)) return
-   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
-   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
-   if (ctx%failed()) then
-      call ctx%get_error(error)
-      return
-   end if
+   call test_polgrad_gen(error, mol, calc)
 
-   call xtb_polarizability(ctx, mol, calc, wfn, alpha)
-   if (.not.ctx%failed()) then
-      call test_failed(error, "Polarizability with solvation was not rejected")
-   end if
+end subroutine test_polgrad_gfn2_alpb
 
-end subroutine test_unsupported_polarizability_solvation
+subroutine test_polgrad_gfn1_gbsa(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+
+   call get_structure(mol, "Heavy28", "teh2_h2s")
+   call get_solvated_calculator(calc, mol, "gfn1", .false., born_kernel%still, error)
+   if (allocated(error)) return
+   call test_polgrad_gen(error, mol, calc)
+
+end subroutine test_polgrad_gfn1_gbsa
 
 end module test_hessian

@@ -1968,7 +1968,7 @@ err:
 
 int test_hessian_solvation_h2co(void)
 {
-    printf("Start test: Hessian with implicit solvation\n");
+    printf("Start test: response properties with implicit solvation\n");
     tblite_error error = NULL;
     tblite_context ctx = NULL;
     tblite_structure mol = NULL;
@@ -1985,7 +1985,7 @@ int test_hessian_solvation_h2co(void)
         +0.00000000000000, +1.77634000000000, -1.10927000000000,
         +0.00000000000000, -1.77634000000000, -1.10927000000000,
     };
-    double hessian[12 * 12], dipgrad[4 * 3 * 3];
+    double hessian[12 * 12], dipgrad[4 * 3 * 3], alpha[3 * 3], dalpha[4 * 3 * 3 * 3];
     double sum;
 
     error = tblite_new_error();
@@ -2029,7 +2029,23 @@ int test_hessian_solvation_h2co(void)
     if (tblite_check(error))
         goto err;
 
+    tblite_get_polarizability(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
+    tblite_get_polarizability_gradient(ctx, mol, calc, res);
+    if (tblite_check(ctx))
+        goto err;
+
     tblite_get_result_dipole_gradient(error, res, dipgrad);
+    if (tblite_check(error))
+        goto err;
+
+    tblite_get_result_polarizability(error, res, alpha);
+    if (tblite_check(error))
+        goto err;
+
+    tblite_get_result_polarizability_gradient(error, res, dalpha);
     if (tblite_check(error))
         goto err;
 
@@ -2060,15 +2076,26 @@ int test_hessian_solvation_h2co(void)
     if (!check(hessian[12 * 2 + 2], 0.823814971280, thr, "hessian error"))
         goto err;
 
+    // polarizability is invariant under translations
+    for (int i = 0; i < 27; i++) {
+        sum = 0.0;
+        for (int iat = 0; iat < natoms; iat++)
+            sum += dalpha[27 * iat + i];
+        if (!check(sum, 0.0, 100 * thr, "polarizability gradient sum rule"))
+            goto err;
+    }
+
+    if (!check(alpha[1], alpha[3], thr, "polarizability symmetry"))
+        goto err;
+
     if (!check(dipgrad[9 * 0 + 3 * 2 + 2], -1.291992089493, thr, "dipole gradient error"))
         goto err;
 
-    // the field response does not include implicit solvation
-    tblite_get_polarizability(ctx, mol, calc, res);
-    if (!tblite_check(ctx))
+    if (!check(alpha[8], 15.147221299152, thr, "polarizability error"))
         goto err;
 
-    show(ctx);
+    if (!check(dalpha[27 * 0 + 9 * 2 + 8], 13.664466358668, 10 * thr, "polarizability gradient error"))
+        goto err;
 
     tblite_delete(error);
     tblite_delete(ctx);
