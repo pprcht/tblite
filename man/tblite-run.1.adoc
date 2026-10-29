@@ -151,12 +151,14 @@ Supported geometry input formats are:
 *--hess*::
      Evaluates the analytical Hessian and the derivative of the dipole moment
      with respect to the atomic positions.
+     Supports the ALPB and GBSA solvation models, but not the ddX models.
      Results are stored together with the gradient information.
-     Only available for closed-shell molecules without solvation model.
+     Only available for closed-shell molecules.
 
 *--polar*::
      Evaluates the analytical static dipole polarizability.
-     Only available for closed-shell molecules without solvation model.
+     Only available for closed-shell molecules.
+     Supports the ALPB and GBSA solvation models, but not the ddX models.
 
 *--polgrad*::
      Evaluates the analytical derivative of the polarizability

@@ -41,6 +41,7 @@ module tblite_solvation_alpb
 
    public :: new_alpb
    public :: born_kernel
+   public :: add_born_mat_p16, add_born_mat_still, get_adet, get_adet_deriv
 
 
    !> Possible Born interaction kernels

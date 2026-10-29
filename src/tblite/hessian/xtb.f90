@@ -33,6 +33,7 @@ module tblite_hessian_xtb
    use tblite_hessian_reference, only : reference_data, new_reference_data, &
       & get_nuclear_perturbation, check_hessian_support
    use tblite_hessian_repulsion, only : get_repulsion_hessian
+   use tblite_hessian_solvation, only : get_solvation_hessian
    use tblite_response_nuclear, only : xtb_nuclear_response
    use tblite_response_polarizability, only : check_response_support
    use tblite_scf, only : potential_type, new_potential
@@ -155,6 +156,9 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
    if (allocated(calc%dispersion) .and. .not.allocated(error)) then
       call get_dispersion_hessian(calc%dispersion, mol, wfn%qat(:, 1), hessian, error)
    end if
+   if (allocated(calc%interactions)) then
+      call get_solvation_hessian(ref%solv, mol, wfn%qat(:, 1), hessian)
+   end if
    if (allocated(error)) call ctx%set_error(error)
 
 end subroutine xtb_hessian
@@ -226,7 +230,8 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
       end if
 
       call xtb_nuclear_response(mol, calc, wfn, ref%ints, ccache, dcache, ds(:, :, ic), &
-         & fock0(:, :, ic), wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error)
+         & fock0(:, :, ic), wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error, &
+         & kat=ref%solv%kmat)
       if (allocated(error)) return
 
       !>-- first-order density with the unperturbed potential and

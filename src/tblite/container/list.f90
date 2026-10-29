@@ -66,6 +66,10 @@ module tblite_container_list
       procedure :: push_back
       !> Remove a container
       procedure :: pop
+      !> Number of stored containers
+      procedure :: get_size
+      !> Copy of a stored container
+      procedure :: get_container
       !> Information about the container list
       procedure :: info
    end type container_list
@@ -367,6 +371,32 @@ subroutine pop(self, cont, idx)
       call move_alloc(self%list(ic+1)%raw, self%list(ic)%raw)
    end do
 end subroutine pop
+
+
+!> Number of stored containers
+pure function get_size(self) result(nc)
+   !> Instance of the container list
+   class(container_list), intent(in) :: self
+   !> Number of stored containers
+   integer :: nc
+
+   nc = self%nc
+end function get_size
+
+
+!> Copy of a stored container, unallocated for an index outside the list.
+!> A copy rather than a pointer, which would require the list to be a target.
+subroutine get_container(self, idx, cont)
+   !> Instance of the container list
+   class(container_list), intent(in) :: self
+   !> Index of the container
+   integer, intent(in) :: idx
+   !> Copy of the container
+   class(container_type), allocatable, intent(out) :: cont
+
+   if (idx < 1 .or. idx > self%nc) return
+   allocate(cont, source=self%list(idx)%raw)
+end subroutine get_container
 
 
 !> Reallocate list of containers

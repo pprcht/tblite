@@ -40,7 +40,7 @@ module tblite_response_field
 contains
 
 subroutine xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh, pot, &
-      & wfn_r, error)
+      & wfn_r, error, kat)
    !***********************************
    !* Solve the coupled-perturbed equations (1 - A) dp = b for a unit field
    !* along the Cartesian direction idir. Here b is the uncoupled density
@@ -74,6 +74,8 @@ subroutine xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh
    type(wavefunction_type), intent(inout) :: wfn_r
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> Atom-resolved charge kernel of additional interactions
+   real(wp), intent(in), optional :: kat(:, :)
 
    real(wp) :: efield(3)
    real(wp), allocatable :: rhs(:, :, :)
@@ -91,7 +93,7 @@ subroutine xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh
    call get_fock_response(calc, ints, pot, dh)
    call density_response(wfn, dh(:, :, 1), rhs(:, :, 1))
 
-   call solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error)
+   call solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat)
    if (allocated(error)) return
 
    call get_response_moments(calc, ints, dp, wfn_r)
@@ -99,7 +101,7 @@ subroutine xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh
    !>-- folding a potential accumulates, hence it is built from scratch
    call pot%reset
    call field%get_potential(mol, fcache, wfn, pot)
-   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_r, pot, error)
+   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_r, pot, error, kat)
    if (allocated(error)) return
    call get_fock_response(calc, ints, pot, dh)
 

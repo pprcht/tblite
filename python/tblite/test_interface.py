@@ -1050,3 +1050,41 @@ def test_response():
     calc.singlepoint(res)
     with raises(TBLiteRuntimeError, match="polarizability"):
         res.get("polarizability")
+
+
+
+def test_response_solvation():
+    """Analytic Hessian and polarizability with implicit solvation"""
+    numbers = np.array([8, 6, 1, 1])
+    positions = np.array(
+        [
+            [+0.00000000000000, +0.00000000000000, +2.27334000000000],
+            [+0.00000000000000, +0.00000000000000, +0.00000000000000],
+            [+0.00000000000000, +1.77634000000000, -1.10927000000000],
+            [+0.00000000000000, -1.77634000000000, -1.10927000000000],
+        ]
+    )
+
+    calc = Calculator("GFN2-xTB", numbers, positions)
+    calc.set("accuracy", 1.0e-3)
+    calc.add("alpb-solvation", "water")
+
+    res = calc.singlepoint()
+    calc.hessian(res)
+    calc.polarizability(res, gradient=True)
+
+    hessian = res.get("hessian")
+    dipgrad = res.get("dipole-gradient")
+    alpha = res.get("polarizability")
+    dalpha = res.get("polarizability-gradient")
+
+    assert hessian == approx(hessian.T, abs=THR)
+    assert hessian.reshape(12, 4, 3).sum(axis=1) == approx(0.0, abs=THR)
+    assert dipgrad.sum(axis=0) == approx(0.0, abs=THR)
+    assert dalpha.sum(axis=0) == approx(0.0, abs=100 * THR)
+    assert alpha == approx(alpha.T, abs=THR)
+
+    assert hessian[2, 2] == approx(0.823814971280, abs=THR)
+    assert dipgrad[0, 2, 2] == approx(-1.291992089493, abs=THR)
+    assert alpha[2, 2] == approx(15.147221299152, abs=THR)
+    assert dalpha[0, 2, 2, 2] == approx(13.664466358668, abs=10 * THR)

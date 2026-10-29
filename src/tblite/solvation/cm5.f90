@@ -30,7 +30,7 @@ module tblite_solvation_cm5
    implicit none
    private
 
-   public :: get_cm5_charges
+   public :: get_cm5_charges, get_cm5_pairpar, cm5_alpha
 
    integer,parameter :: max_elements = 118
 
@@ -71,32 +71,11 @@ subroutine get_cm5_charges(mol, cm5, dcm5dr)
    !> CM5 charge derivatives
    real(wp), intent(out) :: dcm5dr(3, mol%nat, mol%nat)
 
-   ! Pair parameters set up from cm5_a0
-   real(wp), allocatable :: pairpar(:,:)
    integer :: iat, jat, nati, natj
    real(wp) :: pij, pji, rab(3), dist, bkk, bkkda, radi, radj
 
    cm5(:) = 0.0_wp
    dcm5dr(:,:,:) = 0.0_wp
-
-   ! Set up pair parameters
-   allocate (pairpar(max_elements,max_elements),source=0.0_wp)
-   do iat = 1,max_elements
-      do jat = iat+1,max_elements
-         pairpar(iat,jat) = cm5_a0(iat)-cm5_a0(jat)
-      end do
-   end do
-   pairpar(1,6) = 0.0502_wp
-   pairpar(1,7) = 0.1747_wp
-   pairpar(1,8) = 0.1671_wp
-   pairpar(6,7) = 0.0556_wp
-   pairpar(6,8) = 0.0234_wp
-   pairpar(7,8) = -0.0346_wp
-   do iat = 1,max_elements
-      do jat = iat+1,max_elements
-         pairpar(jat,iat) = -pairpar(iat,jat)
-      end do
-   end do
 
    ! Calculate the actual charges
    do iat = 1, mol%nat
@@ -106,8 +85,8 @@ subroutine get_cm5_charges(mol, cm5, dcm5dr)
          natj = mol%num(mol%id(jat))
          if (nati == natj) cycle
          radj = get_atomic_rad(natj)
-         pij = pairpar(nati,natj)
-         pji = pairpar(natj,nati)
+         pij = get_cm5_pairpar(nati,natj)
+         pji = -pij
          rab = mol%xyz(:,iat)-mol%xyz(:,jat)
          dist = norm2(rab)
          bkk = exp(-cm5_alpha*(dist-radi-radj))
@@ -121,8 +100,34 @@ subroutine get_cm5_charges(mol, cm5, dcm5dr)
       end do
    end do
 
-   deallocate (pairpar)
-
 end subroutine get_cm5_charges
+
+!> CM5 pair parameter for two atomic numbers, antisymmetric in its arguments
+elemental function get_cm5_pairpar(nati, natj) result(pij)
+   !> Atomic numbers of the pair
+   integer, intent(in) :: nati, natj
+   !> Pair parameter
+   real(wp) :: pij
+
+   integer :: iz, jz
+
+   iz = min(nati, natj)
+   jz = max(nati, natj)
+   if (iz == jz .or. iz < 1 .or. jz > max_elements) then
+      pij = 0.0_wp
+      return
+   end if
+   select case(1000*iz + jz)
+   case(1006); pij = 0.0502_wp
+   case(1007); pij = 0.1747_wp
+   case(1008); pij = 0.1671_wp
+   case(6007); pij = 0.0556_wp
+   case(6008); pij = 0.0234_wp
+   case(7008); pij = -0.0346_wp
+   case default; pij = cm5_a0(iz) - cm5_a0(jz)
+   end select
+   if (nati > natj) pij = -pij
+
+end function get_cm5_pairpar
 
 end module tblite_solvation_cm5

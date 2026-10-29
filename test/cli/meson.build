@@ -66,6 +66,9 @@ run_testcases = [
   '09a-gfn2xtb-anneal',
   '10a-gfn1xtb-hess',
   '10b-gfn2xtb-polgrad',
+  '10c-gfn2xtb-alpb-hess',
+  '10d-gfn1xtb-gbsa-hess',
+  '10e-gfn2xtb-alpb-polgrad',
 ]
 foreach case: run_testcases
   test(

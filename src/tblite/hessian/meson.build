@@ -13,6 +13,8 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 
+subdir('solvation')
+
 srcs += files(
   'coulomb.f90',
   'dispersion.f90',
@@ -23,5 +25,6 @@ srcs += files(
   'polarizability.f90',
   'reference.f90',
   'repulsion.f90',
+  'solvation.f90',
   'xtb.f90',
 )

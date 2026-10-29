@@ -24,6 +24,7 @@ module test_solvation_cds
    use tblite_container, only : container_cache
    use tblite_scf_potential, only : potential_type
    use tblite_solvation_cds, only : cds_solvation, cds_input
+   use tblite_solvation_cm5, only : get_cm5_pairpar
    use tblite_solvation_data, only : solvent_data, get_solvent_data, &
       & get_vdw_rad_cosmo, get_vdw_rad_bondi, get_vdw_rad_d3
    use tblite_solvation_data_cds, only : get_cds_param
@@ -71,6 +72,7 @@ subroutine collect_solvation_cds(testsuite)
       new_unittest("gradient-scf", test_g_cds), &
       new_unittest("gradient-nonscf", test_g_cds_nonscf), &
       new_unittest("potential", test_p_cds), &
+      new_unittest("cm5-pair-parameter", test_cm5_pairpar), &
       new_unittest("unsupported-solvent", test_unsupported_solvent, should_fail=.true.) &
       ]
 
@@ -859,6 +861,41 @@ subroutine test_unsupported_solvent(error)
    call get_cds_param(input, mol, "gfn1", error)
 
 end subroutine test_unsupported_solvent
+
+subroutine test_cm5_pairpar(error)
+
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iz, jz
+
+   !>-- special pairs and the default difference of the atomic parameters
+   !>   (H 0.0056, He -0.1543, Li 0.0000), compared exactly
+   call check(error, get_cm5_pairpar(1, 6), 0.0502_wp)
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(8, 7), 0.0346_wp)
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(6, 8), 0.0234_wp)
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(1, 2), 0.0056_wp - (-0.1543_wp))
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(3, 2), 0.1543_wp)
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(6, 6), 0.0_wp)
+   if (allocated(error)) return
+   call check(error, get_cm5_pairpar(1, 119), 0.0_wp)
+   if (allocated(error)) return
+
+   do iz = 1, 118
+      do jz = 1, 118
+         if (get_cm5_pairpar(iz, jz) /= -get_cm5_pairpar(jz, iz)) then
+            call test_failed(error, "CM5 pair parameter is not antisymmetric")
+            return
+         end if
+      end do
+   end do
+
+end subroutine test_cm5_pairpar
 
 
 end module test_solvation_cds

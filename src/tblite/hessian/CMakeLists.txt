@@ -13,6 +13,8 @@
 #
 # You should have received a copy of the GNU Lesser General Public License
 
+add_subdirectory("solvation")
+
 set(dir "${CMAKE_CURRENT_SOURCE_DIR}")
 
 list(
@@ -26,6 +28,7 @@ list(
   "${dir}/polarizability.f90"
   "${dir}/reference.f90"
   "${dir}/repulsion.f90"
+  "${dir}/solvation.f90"
   "${dir}/xtb.f90"
 )
 

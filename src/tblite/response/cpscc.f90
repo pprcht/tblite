@@ -45,7 +45,7 @@ module tblite_response_cpscc
 
 contains
 
-subroutine solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error)
+subroutine solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat)
    !***********************************
    !* Solve the coupled-perturbed equations (1 - A) dp = rhs, where A maps a
    !* first-order density matrix to the uncoupled response to the potential
@@ -69,6 +69,8 @@ subroutine solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error)
    real(wp), contiguous, intent(out) :: dp(:, :, :)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> Atom-resolved charge kernel of additional interactions
+   real(wp), intent(in), optional :: kat(:, :)
 
    real(wp) :: resnorm
    real(wp), allocatable :: fock(:, :, :)
@@ -105,7 +107,7 @@ contains
 
       call get_response_moments(calc, ints, x, wfn_k)
       call pot%reset
-      call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_k, pot, local_error)
+      call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_k, pot, local_error, kat)
       if (allocated(local_error) .and. .not.allocated(kernel_error)) then
          call move_alloc(local_error, kernel_error)
       end if

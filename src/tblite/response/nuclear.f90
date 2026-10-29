@@ -39,7 +39,7 @@ module tblite_response_nuclear
 contains
 
 subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0, wfn_m, &
-      & dp, dw, pot, wfn_r, error, fock_r)
+      & dp, dw, pot, wfn_r, error, fock_r, kat)
    !***********************************
    !* Solve the coupled-perturbed equations for one Cartesian displacement.
    !* The perturbation enters via the derivative of the overlap ds and of
@@ -82,19 +82,21 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    type(error_type), allocatable, intent(out) :: error
    !> First-order Hamiltonian including the response of the potential
    real(wp), intent(out), optional :: fock_r(:, :)
+   !> Atom-resolved charge kernel of additional interactions
+   real(wp), intent(in), optional :: kat(:, :)
 
    real(wp), allocatable :: fock(:, :, :), rhs(:, :, :)
 
    allocate(fock(calc%bas%nao, calc%bas%nao, 1), rhs(calc%bas%nao, calc%bas%nao, 1))
 
    call pot%reset
-   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_m, pot, error)
+   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_m, pot, error, kat)
    if (allocated(error)) return
    call get_fock_response(calc, ints, pot, fock)
    fock(:, :, 1) = fock(:, :, 1) + fock0
    call density_response(wfn, fock(:, :, 1), rhs(:, :, 1), ds)
 
-   call solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error)
+   call solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat)
    if (allocated(error)) return
 
    call get_response_moments(calc, ints, dp, wfn_r)
@@ -104,7 +106,7 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    wfn_r%qpat(:, :, :) = wfn_r%qpat + wfn_m%qpat
 
    call pot%reset
-   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_r, pot, error)
+   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_r, pot, error, kat)
    if (allocated(error)) return
    call get_fock_response(calc, ints, pot, fock)
    fock(:, :, 1) = fock(:, :, 1) + fock0

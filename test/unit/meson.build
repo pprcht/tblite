@@ -43,6 +43,7 @@ tests = [
   'hamiltonian',
   'hdf5',
   'hessian',
+  'hessian-solvation',
   'halogen',
   'integral-overlap',
   'integral-multipole',

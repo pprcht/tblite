@@ -26,6 +26,7 @@ module tblite_hessian_polarizability
    use tblite_context, only : context_type
    use tblite_hessian_coulomb, only : get_potential_derivative
    use tblite_hessian_dispersion, only : get_dispersion_potential_derivative
+   use tblite_hessian_solvation, only : get_solvation_kernel_derivative
    use tblite_hessian_multipole, only : get_multipole_potential_derivative
    use tblite_hessian_reference, only : reference_data, new_reference_data, &
       & get_nuclear_perturbation, add_atomic_potential_derivative, add_multipole_fock, &
@@ -126,7 +127,7 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
          call new_potential(fld%pot, mol, calc%bas, 1)
          call new_wavefunction(fld%wfn, nat, nsh, nao, 1, wfn%kt)
          call xtb_field_response(mol, calc, wfn, ref%ints, ccache, dcache, idir, fld%dp, &
-            & fld%dh, fld%pot, fld%wfn, error)
+            & fld%dh, fld%pot, fld%wfn, error, kat=ref%solv%kmat)
          if (allocated(error)) exit
 
          call get_potential_derivative(mol, calc, ccache, fld%wfn, fld%dvshdr)
@@ -140,6 +141,10 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
             call get_dispersion_potential_derivative(calc%dispersion, mol, wfn%qat(:, 1), &
                & dvat, error, dqat=fld%wfn%qat(:, 1))
             if (allocated(error)) exit
+            call add_atomic_potential_derivative(calc, dvat, fld%dvshdr)
+         end if
+         if (allocated(calc%interactions)) then
+            call get_solvation_kernel_derivative(ref%solv, mol, fld%wfn%qat(:, 1), dvat)
             call add_atomic_potential_derivative(calc, dvat, fld%dvshdr)
          end if
          !>-- the potential of a unit field on an atom is minus its position
@@ -253,7 +258,7 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
          wfn_m%qpat(:, :, 1) = dqpat(:, :, ic)
       end if
       call xtb_nuclear_response(mol, calc, wfn, ref%ints, ccache, dcache, ds(:, :, ic), &
-         & fock0(:, :, ic), wfn_m, dp, dw, pot_r, wfn_r, error, fock_r)
+         & fock0(:, :, ic), wfn_m, dp, dw, pot_r, wfn_r, error, fock_r, kat=ref%solv%kmat)
       if (allocated(error)) return
 
       do idir = 1, 3
@@ -267,7 +272,8 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
             end if
 
             call pot_x%reset
-            call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_x, pot_x, error)
+            call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_x, pot_x, error, &
+               & kat=ref%solv%kmat)
             if (allocated(error)) return
             call get_kernel_potential_derivative(mol, calc, dcache, wfn, fld%wfn, wfn_r, &
                & pot_x, error)
@@ -294,7 +300,8 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
             call density_response_derivative(wfn, fld%dh(:, :, 1), fock_r, ds(:, :, ic), tmp)
             rhs(:, :, 1) = rhs(:, :, 1) + tmp
 
-            call solve_cpscc(mol, calc, wfn, ref%ints, ccache, dcache, rhs, dpx, error)
+            call solve_cpscc(mol, calc, wfn, ref%ints, ccache, dcache, rhs, dpx, error, &
+               & kat=ref%solv%kmat)
             if (allocated(error)) return
 
             !>-- mu = sum_A (R_A q_A + d_A), the position enters explicitly
