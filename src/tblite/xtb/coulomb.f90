@@ -19,11 +19,12 @@
 
 !> Collects all Coulomb related interaction in as single interaction container.
 module tblite_xtb_coulomb
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_container, only : container_cache, container_type
    use tblite_coulomb, only : coulomb_charge_type, damped_multipole, onsite_thirdorder
    use tblite_partition, only : work_partition
+   use tblite_response_type, only : kernel_type, response_type
    use tblite_scf_potential, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
    implicit none
@@ -45,6 +46,9 @@ module tblite_xtb_coulomb
       procedure :: get_potential
       procedure :: get_potential_gradient
       procedure :: get_gradient
+      procedure :: get_response_kernel
+      procedure :: get_response_derivative
+      procedure :: get_hessian
       procedure :: info
    end type tb_coulomb
 
@@ -191,6 +195,108 @@ subroutine get_gradient(self, mol, cache, wfn, gradient, sigma)
       call self%es3%get_gradient(mol, cache, wfn, gradient, sigma)
    end if
 end subroutine get_gradient
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the response kernel of all electrostatic contributions.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(tb_coulomb), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   if (allocated(self%es2)) then
+      call self%es2%get_response_kernel(mol, cache, wfn, kernel, error, dwfn)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%aes2)) then
+      call self%aes2%get_response_kernel(mol, cache, wfn, kernel, error, dwfn)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%es3)) then
+      call self%es3%get_response_kernel(mol, cache, wfn, kernel, error, dwfn)
+   end if
+end subroutine get_response_kernel
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error)
+   !***********************************
+   !* Add the mixed second derivatives of all electrostatic contributions.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(tb_coulomb), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   if (allocated(self%es2)) then
+      call self%es2%get_response_derivative(mol, cache, wfn, response, error)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%aes2)) then
+      call self%aes2%get_response_derivative(mol, cache, wfn, response, error)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%es3)) then
+      call self%es3%get_response_derivative(mol, cache, wfn, response, error)
+   end if
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian at fixed density variables of all electrostatic
+   !* contributions.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(tb_coulomb), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   if (allocated(self%es2)) then
+      call self%es2%get_hessian(mol, cache, wfn, hessian, error)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%aes2)) then
+      call self%aes2%get_hessian(mol, cache, wfn, hessian, error)
+      if (allocated(error)) return
+   end if
+
+   if (allocated(self%es3)) then
+      call self%es3%get_hessian(mol, cache, wfn, hessian, error)
+   end if
+end subroutine get_hessian
 
 
 pure function variable_info(self) result(info)

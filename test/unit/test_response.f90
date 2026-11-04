@@ -20,10 +20,12 @@ module test_response
       & test_failed
    use mctc_io, only : structure_type
    use mstore, only : get_structure
-   use tblite_container, only : container_type
+   use tblite_container, only : container_type, container_cache
    use tblite_context_type, only : context_type
    use tblite_external_field, only : electric_field
    use tblite_response_polarizability, only : xtb_polarizability
+   use tblite_response_type, only : kernel_type, new_kernel, response_type, new_response
+   use tblite_scf_potential, only : potential_type, new_potential
    use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
       & solvent_data, get_solvent_data, new_solvation, new_solvation_cds, &
       & new_solvation_shift, solvation_type, born_kernel
@@ -55,7 +57,10 @@ subroutine collect_response(testsuite)
       new_unittest("gfn2-polarizability-smearing", test_alpha_gfn2_smearing), &
       new_unittest("gfn2-polarizability-alpb", test_alpha_gfn2_alpb), &
       new_unittest("gfn1-polarizability-gbsa", test_alpha_gfn1_gbsa), &
-      new_unittest("unsupported-interaction", test_unsupported, should_fail=.true.) &
+      new_unittest("unsupported-interaction", test_unsupported, should_fail=.true.), &
+      new_unittest("kernel-potential", test_kernel_potential), &
+      new_unittest("default-no-density", test_default_no_density), &
+      new_unittest("missing-second-derivative", test_missing_derivative) &
       ]
 
 end subroutine collect_response
@@ -276,5 +281,184 @@ subroutine test_unsupported(error)
    if (ctx%failed()) call ctx%get_error(error)
 
 end subroutine test_unsupported
+
+
+subroutine test_kernel_potential(error)
+   !***********************************
+   !* Potential of a GFN2 sized kernel with arbitrary symmetric blocks
+   !* against explicit sums over all blocks.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(kernel_type) :: kernel
+   type(wavefunction_type) :: wfn
+   type(potential_type) :: pot
+   integer :: nat, nsh, iat, jat, ish, jsh, ic, jc
+   real(wp), allocatable :: vat(:), vsh(:), vdp(:, :), vqp(:, :)
+   real(wp), parameter :: thr = 1.0e-12_wp
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   nat = mol%nat
+   nsh = calc%bas%nsh
+
+   call new_kernel(kernel, mol, calc%bas, calc%variable_info())
+   if (.not.(allocated(kernel%kdpdp) .and. allocated(kernel%kqpqp))) then
+      call test_failed(error, "Multipole blocks of the GFN2 kernel are missing")
+      return
+   end if
+
+   do iat = 1, nat
+      do jat = 1, nat
+         kernel%kat(jat, iat) = 1.0_wp / (1.0_wp + iat + jat)
+         do ic = 1, 3
+            kernel%kdpat(ic, jat, iat) = 0.1_wp * ic / (iat + 2*jat)
+            do jc = 1, 3
+               kernel%kdpdp(jc, jat, ic, iat) = 0.2_wp / (ic + jc + iat + jat)
+            end do
+         end do
+         do ic = 1, 6
+            kernel%kqpat(ic, jat, iat) = 0.05_wp * ic / (2*iat + jat)
+         end do
+      end do
+      do ic = 1, 6
+         do jc = 1, 6
+            kernel%kqpqp(jc, ic, iat) = 0.3_wp / (ic + jc + iat)
+         end do
+      end do
+   end do
+   do ish = 1, nsh
+      do jsh = 1, nsh
+         kernel%ksh(jsh, ish) = 1.0_wp / (2.0_wp + ish + jsh)
+      end do
+   end do
+
+   call new_wavefunction(wfn, nat, nsh, calc%bas%nao, 1, kt)
+   do iat = 1, nat
+      wfn%qat(iat, 1) = sin(real(iat, wp))
+      do ic = 1, 3
+         wfn%dpat(ic, iat, 1) = cos(real(ic + iat, wp))
+      end do
+      do ic = 1, 6
+         wfn%qpat(ic, iat, 1) = sin(real(ic * iat, wp))
+      end do
+   end do
+   do ish = 1, nsh
+      wfn%qsh(ish, 1) = cos(real(ish, wp))
+   end do
+
+   call new_potential(pot, mol, calc%bas, 1)
+   call pot%reset
+   call kernel%get_potential(wfn, pot)
+
+   allocate(vat(nat), vsh(nsh), vdp(3, nat), vqp(6, nat), source=0.0_wp)
+   do iat = 1, nat
+      do jat = 1, nat
+         vat(iat) = vat(iat) + kernel%kat(iat, jat) * wfn%qat(jat, 1) &
+            & + sum(kernel%kdpat(:, jat, iat) * wfn%dpat(:, jat, 1)) &
+            & + sum(kernel%kqpat(:, jat, iat) * wfn%qpat(:, jat, 1))
+         vdp(:, iat) = vdp(:, iat) + kernel%kdpat(:, iat, jat) * wfn%qat(jat, 1)
+         vqp(:, iat) = vqp(:, iat) + kernel%kqpat(:, iat, jat) * wfn%qat(jat, 1)
+         do jc = 1, 3
+            vdp(:, iat) = vdp(:, iat) + kernel%kdpdp(:, iat, jc, jat) * wfn%dpat(jc, jat, 1)
+         end do
+      end do
+      vqp(:, iat) = vqp(:, iat) + matmul(kernel%kqpqp(:, :, iat), wfn%qpat(:, iat, 1))
+   end do
+   vsh(:) = matmul(kernel%ksh, wfn%qsh(:, 1))
+
+   if (maxval(abs(pot%vat(:, 1) - vat)) > thr .or. maxval(abs(pot%vsh(:, 1) - vsh)) > thr &
+      & .or. maxval(abs(pot%vdp(:, :, 1) - vdp)) > thr &
+      & .or. maxval(abs(pot%vqp(:, :, 1) - vqp)) > thr) then
+      call test_failed(error, "Kernel potential does not match the explicit sum")
+   end if
+end subroutine test_kernel_potential
+
+
+subroutine test_default_no_density(error)
+   !***********************************
+   !* Containers without density dependence have no kernel and no mixed
+   !* derivative, the defaults must succeed without changing anything.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(kernel_type) :: kernel
+   type(response_type) :: response
+   type(wavefunction_type) :: wfn
+   type(container_cache) :: cache
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn1_calculator(calc, mol, error)
+   if (allocated(error)) return
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call new_kernel(kernel, mol, calc%bas, calc%variable_info())
+   call new_response(response, mol, calc%bas, [1, 2, 3])
+
+   call calc%repulsion%update(mol, cache)
+   call calc%repulsion%get_response_kernel(mol, cache, wfn, kernel, error)
+   if (allocated(error)) return
+   call calc%repulsion%get_response_kernel(mol, cache, wfn, kernel, error, dwfn=wfn)
+   if (allocated(error)) return
+   call calc%repulsion%get_response_derivative(mol, cache, wfn, response, error)
+   if (allocated(error)) return
+
+   call check(error, maxval(abs(kernel%kat)) + maxval(abs(kernel%ksh)), 0.0_wp)
+   if (allocated(error)) return
+   call check(error, maxval(abs(response%vsh)) + maxval(abs(response%hessian)), 0.0_wp)
+end subroutine test_default_no_density
+
+
+subroutine test_missing_derivative(error)
+   !***********************************
+   !* A density dependent container without second derivatives must fail
+   !* for all three procedures, also when stored in a container list.
+   !***********************************
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(structure_type) :: mol
+   type(xtb_calculator) :: calc
+   type(kernel_type) :: kernel
+   type(response_type) :: response
+   type(wavefunction_type) :: wfn
+   type(container_cache) :: cache
+   class(container_type), allocatable :: cont
+   type(error_type), allocatable :: kernel_error, derivative_error, hessian_error
+   real(wp), allocatable :: hessian(:, :)
+
+   call get_structure(mol, "MB16-43", "01")
+   call new_gfn2_calculator(calc, mol, error)
+   if (allocated(error)) return
+   cont = electric_field([0.0_wp, 0.0_wp, 1.0e-3_wp])
+   call calc%push_back(cont)
+
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call new_kernel(kernel, mol, calc%bas, calc%variable_info())
+   call new_response(response, mol, calc%bas, [1, 2, 3])
+   allocate(hessian(3*mol%nat, 3*mol%nat), source=0.0_wp)
+
+   call calc%interactions%update(mol, cache)
+   call calc%interactions%get_response_kernel(mol, cache, wfn, kernel, kernel_error)
+   call calc%interactions%get_response_derivative(mol, cache, wfn, response, &
+      & derivative_error)
+   call calc%interactions%get_hessian(mol, cache, wfn, hessian, hessian_error)
+
+   if (.not.allocated(kernel_error)) then
+      call test_failed(error, "Missing response kernel was not reported")
+   else if (.not.allocated(derivative_error)) then
+      call test_failed(error, "Missing response derivative was not reported")
+   else if (.not.allocated(hessian_error)) then
+      call test_failed(error, "Missing Hessian was not reported")
+   else if (index(kernel_error%message, "electric field") == 0) then
+      call test_failed(error, "Error does not name the container: "//kernel_error%message)
+   end if
+end subroutine test_missing_derivative
 
 end module test_response

@@ -25,6 +25,7 @@ list(
   "${dir}/kernel.f90"
   "${dir}/nuclear.f90"
   "${dir}/polarizability.f90"
+  "${dir}/type.f90"
 )
 
 set(srcs "${srcs}" PARENT_SCOPE)

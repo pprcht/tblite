@@ -22,4 +22,5 @@ srcs += files(
   'kernel.f90',
   'nuclear.f90',
   'polarizability.f90',
+  'type.f90',
 )

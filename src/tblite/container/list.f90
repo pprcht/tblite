@@ -19,12 +19,13 @@
 
 !> Definition of list of general interaction contaienrs
 module tblite_container_list
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_container_cache, only : container_cache, resize
    use tblite_container_type, only : container_type
    use tblite_output_format, only : format_string
    use tblite_partition, only : work_partition
+   use tblite_response_type, only : kernel_type, response_type
    use tblite_scf_info, only : scf_info
    use tblite_scf_potential, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
@@ -62,6 +63,12 @@ module tblite_container_list
       procedure :: get_potential_gradient
       !> Evaluate gradient contributions from the selfconsistent interaction
       procedure :: get_gradient
+      !> Evaluate second derivative w.r.t. the density variables
+      procedure :: get_response_kernel
+      !> Evaluate mixed second derivative w.r.t. the density variables and positions
+      procedure :: get_response_derivative
+      !> Evaluate second derivative w.r.t. the positions at fixed density variables
+      procedure :: get_hessian
       !> Add a container
       procedure :: push_back
       !> Remove a container
@@ -276,6 +283,110 @@ subroutine get_gradient(self, mol, cache, wfn, gradient, sigma)
       end if
    end do
 end subroutine get_gradient
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the response kernel of all stored containers, stopping at the
+   !* first container without analytic second derivatives.
+   !***********************************
+   !> Instance of the interaction container
+   class(container_list), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   integer :: ic
+   type(cache_list), pointer :: ptr
+
+   call view(cache, ptr)
+
+   do ic = 1, self%nc
+      if (allocated(self%list(ic)%raw)) then
+         associate(cont => self%list(ic)%raw)
+            call cont%get_response_kernel(mol, ptr%list(ic), wfn, kernel, error, dwfn)
+         end associate
+         if (allocated(error)) return
+      end if
+   end do
+end subroutine get_response_kernel
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error)
+   !***********************************
+   !* Add the mixed second derivatives of all stored containers, stopping at
+   !* the first container without analytic second derivatives.
+   !***********************************
+   !> Instance of the interaction container
+   class(container_list), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: ic
+   type(cache_list), pointer :: ptr
+
+   call view(cache, ptr)
+
+   do ic = 1, self%nc
+      if (allocated(self%list(ic)%raw)) then
+         associate(cont => self%list(ic)%raw)
+            call cont%get_response_derivative(mol, ptr%list(ic), wfn, response, error)
+         end associate
+         if (allocated(error)) return
+      end if
+   end do
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian at fixed density variables of all stored containers,
+   !* stopping at the first container without analytic second derivatives.
+   !***********************************
+   !> Instance of the interaction container
+   class(container_list), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: ic
+   type(cache_list), pointer :: ptr
+
+   call view(cache, ptr)
+
+   do ic = 1, self%nc
+      if (allocated(self%list(ic)%raw)) then
+         associate(cont => self%list(ic)%raw)
+            call cont%get_hessian(mol, ptr%list(ic), wfn, hessian, error)
+         end associate
+         if (allocated(error)) return
+      end if
+   end do
+end subroutine get_hessian
 
 
 !> Get information about density dependent quantities used in the energy
