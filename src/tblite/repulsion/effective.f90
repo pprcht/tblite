@@ -19,12 +19,14 @@
 
 !> Classical repulsion interaction as used with the xTB Hamiltonian
 module tblite_repulsion_effective
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_container, only : container_cache
    use tblite_cutoff, only : get_lattice_points
+   use tblite_hessian_pair, only : get_pair_block, add_pair_hessian
    use tblite_partition, only : work_partition, owns_pair
    use tblite_repulsion_type, only : repulsion_type
+   use tblite_wavefunction_type, only : wavefunction_type
    implicit none
    private
 
@@ -45,6 +47,8 @@ module tblite_repulsion_effective
       real(wp) :: cutoff = 25.0_wp
    contains
       procedure :: get_engrad
+      !> Evaluate second derivative w.r.t. the positions
+      procedure :: get_hessian
    end type tb_repulsion
 
    character(len=*), parameter :: label = "screened Coulomb repulsion"
@@ -131,6 +135,56 @@ subroutine get_engrad(self, mol, cache, energies, gradient, sigma)
    end if
 
 end subroutine get_engrad
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian of the repulsion energy, a sum of pair terms
+   !* f(r) = zeff exp(-alpha r**kexp) / r**rexp. With g = f'/f the
+   !* derivatives are f' = g f and f'' = (g' + g**2) f.
+   !* Interactions of an atom with its own periodic images are not included.
+   !***********************************
+   !> Instance of the repulsion container
+   class(tb_repulsion), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iat, jat, izp, jzp, itr
+   real(wp) :: r1, r2, vec(3), cutoff2, r1k, fval, g, dg, block(3, 3)
+   real(wp), allocatable :: trans(:, :)
+
+   call get_lattice_points(mol%periodic, mol%lattice, self%cutoff, trans)
+   cutoff2 = self%cutoff**2
+
+   do iat = 1, mol%nat
+      izp = mol%id(iat)
+      do jat = 1, iat - 1
+         jzp = mol%id(jat)
+         do itr = 1, size(trans, 2)
+            vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat) - trans(:, itr)
+            r2 = sum(vec**2)
+            if (r2 > cutoff2 .or. r2 < 1.0e-12_wp) cycle
+            r1 = sqrt(r2)
+            r1k = r1**self%kexp(jzp, izp)
+            fval = self%zeff(jzp, izp) * exp(-self%alpha(jzp, izp)*r1k) &
+               & / r1**self%rexp(jzp, izp)
+            g = -(self%alpha(jzp, izp)*self%kexp(jzp, izp)*r1k + self%rexp(jzp, izp)) / r1
+            dg = (self%rexp(jzp, izp) - self%alpha(jzp, izp)*self%kexp(jzp, izp) &
+               & * (self%kexp(jzp, izp) - 1.0_wp)*r1k) / r2
+            call get_pair_block(g*fval, (dg + g*g)*fval, r1, vec, block)
+            call add_pair_hessian(hessian, iat, jat, block)
+         end do
+      end do
+   end do
+end subroutine get_hessian
 
 
 subroutine get_repulsion_energy(mol, trans, cutoff, alpha, zeff, kexp, rexp, &

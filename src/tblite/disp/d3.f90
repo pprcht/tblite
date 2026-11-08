@@ -19,7 +19,8 @@
 
 !> Semiclassical DFT-D3 dispersion correction
 module tblite_disp_d3
-   use dftd3, only : d3_model, new_d3_model, rational_damping_param, realspace_cutoff
+   use dftd3, only : d3_model, new_d3_model, rational_damping_param, realspace_cutoff, &
+      & get_d3_dispersion => get_dispersion
    use mctc_env, only : error_type, wp
    use mctc_io, only : structure_type
    use mctc_ncoord, only : new_ncoord, ncoord_type, cn_count
@@ -27,6 +28,7 @@ module tblite_disp_d3
    use tblite_cutoff, only : get_lattice_points
    use tblite_disp_cache, only : dispersion_cache
    use tblite_disp_type, only : dispersion_type
+   use tblite_wavefunction_type, only : wavefunction_type
    implicit none
    private
 
@@ -45,6 +47,8 @@ module tblite_disp_d3
       class(ncoord_type), allocatable :: ncoord
    contains
       procedure :: get_engrad
+      !> Evaluate second derivative w.r.t. the positions
+      procedure :: get_hessian
    end type d3_dispersion
 
    character(len=*), parameter :: label = "DFT-D3(BJ) dispersion correction"
@@ -146,5 +150,31 @@ subroutine get_engrad(self, mol, cache, energies, gradient, sigma)
    end if
 end subroutine get_engrad
 
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian of the D3 dispersion energy, evaluated by s-dftd3.
+   !***********************************
+   !> Instance of the dispersion correction
+   class(d3_dispersion), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different dispersion runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   real(wp), allocatable :: energies(:), tmp(:, :)
+
+   allocate(energies(mol%nat), tmp(3*mol%nat, 3*mol%nat))
+   call get_d3_dispersion(error, mol, self%model, self%param, self%cutoff, energies, &
+      & hessian=tmp)
+   if (allocated(error)) return
+   hessian(:, :) = hessian + tmp
+end subroutine get_hessian
 
 end module tblite_disp_d3

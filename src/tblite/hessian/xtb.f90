@@ -23,19 +23,16 @@ module tblite_hessian_xtb
    use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_blas, only : gemv, gemm
-   use tblite_container, only : container_cache
    use tblite_context, only : context_type
-   use tblite_hessian_coulomb, only : get_coulomb_hessian
-   use tblite_hessian_dispersion, only : get_dispersion_hessian
-   use tblite_hessian_halogen, only : get_halogen_hessian
    use tblite_hessian_hamiltonian, only : get_hamiltonian_hessian
-   use tblite_hessian_multipole, only : get_multipole_hessian, get_multipole_band_hessian
+   use tblite_hessian_multipole, only : get_multipole_band_hessian
    use tblite_hessian_reference, only : reference_data, new_reference_data, &
       & get_nuclear_perturbation, check_hessian_support
-   use tblite_hessian_repulsion, only : get_repulsion_hessian
-   use tblite_hessian_solvation, only : get_solvation_hessian
+   use tblite_response_kernel, only : interaction_cache, get_response_kernel, &
+      & get_response_derivative, get_interaction_hessian
    use tblite_response_nuclear, only : xtb_nuclear_response
    use tblite_response_polarizability, only : check_response_support
+   use tblite_response_type, only : kernel_type, response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
    use tblite_wavefunction_mulliken, only : get_mulliken_atomic_multipoles
@@ -76,42 +73,40 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
    !> displacement of atom iat in direction ic
    real(wp), intent(out), optional :: dipgrad(:, :, :)
 
-   integer :: nat, nao, nsh, iat
-   logical :: multipoles, dipole
-   real(wp), allocatable :: wmat(:, :), dqshdr(:, :), dmu(:, :, :)
+   integer :: nat, nao, iat
+   logical :: dipole
+   real(wp), allocatable :: wmat(:, :), dmu(:, :, :)
    type(reference_data) :: ref
+   type(interaction_cache) :: cache
+   type(kernel_type) :: kernel
    type(error_type), allocatable :: error, local_error
 
    nat = mol%nat
    nao = calc%bas%nao
-   nsh = calc%bas%nsh
-   multipoles = allocated(calc%coulomb%aes2)
    dipole = present(dipgrad)
    hessian(:, :) = 0.0_wp
    if (dipole) dipgrad(:, :, :) = 0.0_wp
 
    call check_response_support(mol, calc, wfn, error)
    if (.not.allocated(error)) call check_hessian_support(calc, error)
+   if (.not.allocated(error)) then
+      call new_reference_data(ref, mol, calc, wfn, cache)
+      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
+   end if
    if (allocated(error)) then
       call ctx%set_error(error)
       return
    end if
 
-   call new_reference_data(ref, mol, calc, wfn, error)
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
-   allocate(dqshdr(nsh, 3*nat))
-
-   !>-- response part, one coupled-perturbed solution per coordinate
+   !>-- response part, one coupled-perturbed solution per coordinate,
+   !>   the caches are only read from here on
    allocate(dmu(3, 3, nat), source=0.0_wp)
    !$omp parallel do schedule(dynamic) default(none) &
-   !$omp shared(mol, calc, wfn, ref, nat, dipole, hessian, dqshdr, dmu, error) &
+   !$omp shared(mol, calc, wfn, ref, cache, kernel, nat, dipole, hessian, dmu, error) &
    !$omp private(iat, local_error)
    do iat = 1, nat
-      call get_response_columns(mol, calc, wfn, ref, iat, dipole, &
-         & hessian(:, 3*iat-2:3*iat), dqshdr(:, 3*iat-2:3*iat), dmu(:, :, iat), local_error)
+      call get_response_columns(mol, calc, wfn, ref, cache, kernel, iat, dipole, &
+         & hessian(:, 3*iat-2:3*iat), dmu(:, :, iat), local_error)
       if (allocated(local_error)) then
          !$omp critical (tblite_hessian_xtb_error)
          if (.not.allocated(error)) call move_alloc(local_error, error)
@@ -132,42 +127,24 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
    call get_hamiltonian_hessian(mol, calc%bas, calc%h0, calc%ncoord, ref%selfenergy, &
       & ref%dsedcn, wfn%density(:, :, 1), wmat, ref%pot%vao(:, 1), ref%dcndr, ref%lattr, &
       & ref%cutoff, hessian)
-
-   !>-- the potential depends on the geometry and acts on the charges, whose
-   !>   derivative at fixed density stems from the overlap
-   call gemm(dqshdr, ref%dvshdr, hessian, transa="t", alpha=0.5_wp, beta=1.0_wp)
-   call gemm(ref%dvshdr, dqshdr, hessian, transa="t", alpha=0.5_wp, beta=1.0_wp)
-
-   if (multipoles) then
+   if (allocated(calc%coulomb%aes2)) then
       call get_multipole_band_hessian(mol, calc%bas, wfn%density(:, :, 1), &
-         & ref%pot%vdp(:, :, 1), ref%pot%vqp(:, :, 1), ref%dvdp, ref%dvqp, ref%lattr, &
-         & ref%cutoff, hessian)
-      call get_multipole_hessian(calc%coulomb%aes2, mol, wfn%qat(:, 1), &
-         & wfn%dpat(:, :, 1), wfn%qpat(:, :, 1), hessian)
+         & ref%pot%vdp(:, :, 1), ref%pot%vqp(:, :, 1), ref%lattr, ref%cutoff, hessian)
    end if
-
-   call get_coulomb_hessian(calc, mol, wfn, hessian, error)
-   if (allocated(calc%repulsion)) then
-      call get_repulsion_hessian(calc%repulsion, mol, hessian)
-   end if
-   if (allocated(calc%halogen) .and. .not.allocated(error)) then
-      call get_halogen_hessian(calc%halogen, mol, hessian, error)
-   end if
-   if (allocated(calc%dispersion) .and. .not.allocated(error)) then
-      call get_dispersion_hessian(calc%dispersion, mol, wfn%qat(:, 1), hessian, error)
-   end if
-   if (allocated(calc%interactions)) then
-      call get_solvation_hessian(ref%solv, mol, wfn%qat(:, 1), hessian)
-   end if
+   call get_interaction_hessian(mol, calc, cache, wfn, hessian, error)
    if (allocated(error)) call ctx%set_error(error)
 
 end subroutine xtb_hessian
 
-subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshdr, dmu, error)
+subroutine get_response_columns(mol, calc, wfn, ref, cache, kernel, iat, dipole, columns, &
+      & dmu, error)
    !***********************************
    !* Response part of the three Hessian columns belonging to the
-   !* displacements of one atom, together with the derivative of the shell
-   !* charges at fixed density and, on request, of the dipole moment.
+   !* displacements of one atom and, on request, the derivative of the
+   !* dipole moment. The derivative of the potential at fixed moments is
+   !* contracted with the first-order moments of the density response and
+   !* twice with the ones at fixed density. The symmetrization of the
+   !* Hessian turns the latter into the contraction of both orders.
    !* All work arrays are local to allow evaluating atoms in parallel.
    !***********************************
    !> Molecular structure data
@@ -178,14 +155,16 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
    type(wavefunction_type), intent(in) :: wfn
    !> Quantities of the unperturbed system
    type(reference_data), intent(in) :: ref
+   !> Caches of the interaction containers
+   type(interaction_cache), intent(inout) :: cache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
    !> Displaced atom
    integer, intent(in) :: iat
    !> Evaluate the derivative of the dipole moment
    logical, intent(in) :: dipole
    !> Response part of the Hessian columns
    real(wp), intent(out) :: columns(:, :)
-   !> Derivative of the shell charges at fixed density
-   real(wp), intent(out) :: dqshdr(:, :)
    !> Derivative of the dipole moment
    real(wp), intent(inout) :: dmu(:, :)
    !> Error handling
@@ -195,30 +174,30 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
    logical :: multipoles
    real(wp) :: sigma(3, 3)
    real(wp), allocatable :: ds(:, :, :), fock0(:, :, :), dp(:, :, :), dw(:, :, :)
-   real(wp), allocatable :: zero(:, :, :)
+   real(wp), allocatable :: zero(:, :, :), dqshdr(:, :)
    real(wp), allocatable :: ddpat(:, :, :), dqpat(:, :, :), dpat(:, :, :)
    real(wp), allocatable :: grad(:, :), dEdcn(:)
-   type(container_cache) :: ccache, dcache
    type(potential_type) :: pot_r
    type(wavefunction_type) :: wfn_r, wfn_m
+   type(response_type) :: response
 
    nat = mol%nat
    nao = calc%bas%nao
    nsh = calc%bas%nsh
    multipoles = allocated(calc%coulomb%aes2)
 
-   !>-- the caches serve as scratch space of the containers
-   call calc%coulomb%update(mol, ccache)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, dcache)
    call new_potential(pot_r, mol, calc%bas, 1)
    call new_wavefunction(wfn_r, nat, nsh, nao, 1, wfn%kt)
    call new_wavefunction(wfn_m, nat, nsh, nao, 1, wfn%kt)
+   call new_response(response, mol, calc%bas, [3*iat-2, 3*iat-1, 3*iat])
    allocate(ds(nao, nao, 3), fock0(nao, nao, 3), dp(nao, nao, 1), dw(nao, nao, 1))
-   allocate(grad(3, nat), dEdcn(nat), dpat(3, nat, 1), ddpat(3, nat, 3), dqpat(6, nat, 3))
+   allocate(grad(3, nat), dEdcn(nat), dpat(3, nat, 1), ddpat(3, nat, 3), dqpat(6, nat, 3), &
+      & dqshdr(nsh, 3))
    allocate(zero(nao, nao, 1), source=0.0_wp)
 
-   call get_nuclear_perturbation(mol, calc, wfn, ref, iat, dipole, ds, fock0, dqshdr, &
-      & ddpat, dqpat)
+   call get_nuclear_perturbation(mol, calc, wfn, ref, cache, iat, dipole, ds, fock0, &
+      & dqshdr, ddpat, dqpat, error)
+   if (allocated(error)) return
 
    do ic = 1, 3
       !>-- derivative of the charges and moments at fixed density
@@ -229,9 +208,8 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
          wfn_m%qpat(:, :, 1) = dqpat(:, :, ic)
       end if
 
-      call xtb_nuclear_response(mol, calc, wfn, ref%ints, ccache, dcache, ds(:, :, ic), &
-         & fock0(:, :, ic), wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error, &
-         & kat=ref%solv%kmat)
+      call xtb_nuclear_response(mol, calc, wfn, ref%ints, kernel, ds(:, :, ic), &
+         & fock0(:, :, ic), wfn_m, dp, dw(:, :, 1), pot_r, wfn_r, error)
       if (allocated(error)) return
 
       !>-- first-order density with the unperturbed potential and
@@ -243,13 +221,14 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
       call get_hamiltonian_gradient(mol, ref%lattr, ref%list, calc%bas, calc%h0, &
          & ref%selfenergy, ref%dsedcn, pot_r, wfn%density, zero, dEdcn, grad, sigma)
       call gemv(ref%dcndr, dEdcn, grad, beta=1.0_wp)
+      columns(:, ic) = reshape(grad, [3*nat])
 
-      !>-- first-order charges and moments with the derivative of the potential
-      if (multipoles) then
-         call add_moment_gradient(wfn_r, ref%dvdp, ref%dvqp, grad)
-      end if
-      call gemv(ref%dvshdr, wfn_r%qsh(:, 1), columns(:, ic), trans="t")
-      columns(:, ic) = columns(:, ic) + reshape(grad, [3*nat])
+      !>-- moments contracted with the derivative of the potential, wfn_r
+      !>   holds the total first-order moments
+      response%qsh(:, ic) = wfn_r%qsh(:, 1) + wfn_m%qsh(:, 1)
+      response%qat(:, ic) = wfn_r%qat(:, 1) + wfn_m%qat(:, 1)
+      response%dpat(:, :, ic) = wfn_r%dpat(:, :, 1) + wfn_m%dpat(:, :, 1)
+      response%qpat(:, :, ic) = wfn_r%qpat(:, :, 1) + wfn_m%qpat(:, :, 1)
 
       !>-- mu = sum_A (R_A q_A + d_A), the atomic dipoles enter for all methods
       if (dipole) then
@@ -259,32 +238,11 @@ subroutine get_response_columns(mol, calc, wfn, ref, iat, dipole, columns, dqshd
          dmu(ic, ic) = dmu(ic, ic) + wfn%qat(iat, 1)
       end if
    end do
+
+   call get_response_derivative(mol, calc, cache, wfn, response, error)
+   if (allocated(error)) return
+   columns(:, :) = columns + reshape(response%hessian, [3*nat, 3])
 end subroutine get_response_columns
-
-subroutine add_moment_gradient(wfn_r, dvdp, dvqp, gradient)
-   !***********************************
-   !* Add the contraction of first-order atomic multipole moments with the
-   !* derivative of the multipole potentials to the gradient.
-   !***********************************
-   !> First-order charges and multipole moments
-   type(wavefunction_type), intent(in) :: wfn_r
-   !> Derivative of the potential acting on the dipole moments
-   real(wp), intent(in) :: dvdp(:, :, :, :)
-   !> Derivative of the potential acting on the quadrupole moments
-   real(wp), intent(in) :: dvqp(:, :, :, :)
-   !> Molecular gradient
-   real(wp), intent(inout) :: gradient(:, :)
-
-   integer :: kat, ic
-
-   do kat = 1, size(gradient, 2)
-      do ic = 1, 3
-         gradient(ic, kat) = gradient(ic, kat) &
-            & + sum(wfn_r%dpat(:, :, 1) * dvdp(:, :, ic, kat)) &
-            & + sum(wfn_r%qpat(:, :, 1) * dvqp(:, :, ic, kat))
-      end do
-   end do
-end subroutine add_moment_gradient
 
 subroutine get_wdensity(wfn, wmat)
    !***********************************

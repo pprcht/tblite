@@ -23,11 +23,10 @@
 module tblite_response_cpscc
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
-   use tblite_container, only : container_cache
    use tblite_integral_type, only : integral_type
    use tblite_response_bicgstab, only : bicgstab_solve
    use tblite_response_density, only : density_response
-   use tblite_response_kernel, only : get_kernel_potential
+   use tblite_response_type, only : kernel_type
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
    use tblite_scf_potential, only : add_pot_to_h1
@@ -45,7 +44,7 @@ module tblite_response_cpscc
 
 contains
 
-subroutine solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat)
+subroutine solve_cpscc(mol, calc, wfn, ints, kernel, rhs, dp, error)
    !***********************************
    !* Solve the coupled-perturbed equations (1 - A) dp = rhs, where A maps a
    !* first-order density matrix to the uncoupled response to the potential
@@ -59,34 +58,25 @@ subroutine solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat
    type(wavefunction_type), intent(in) :: wfn
    !> Integrals at the current geometry
    type(integral_type), intent(in) :: ints
-   !> Cache of the electrostatic container
-   type(container_cache), intent(inout) :: ccache
-   !> Cache of the dispersion container
-   type(container_cache), intent(inout) :: dcache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
    !> Uncoupled response to the perturbation
    real(wp), contiguous, intent(in) :: rhs(:, :, :)
    !> First-order density matrix
    real(wp), contiguous, intent(out) :: dp(:, :, :)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
-   !> Atom-resolved charge kernel of additional interactions
-   real(wp), intent(in), optional :: kat(:, :)
 
    real(wp) :: resnorm
    real(wp), allocatable :: fock(:, :, :)
    type(potential_type) :: pot
    type(wavefunction_type) :: wfn_k
-   type(error_type), allocatable :: kernel_error
 
    call new_potential(pot, mol, calc%bas, wfn%nspin)
    call new_wavefunction(wfn_k, mol%nat, calc%bas%nsh, calc%bas%nao, wfn%nspin, wfn%kt)
    allocate(fock(calc%bas%nao, calc%bas%nao, 1))
 
    call bicgstab_solve(rhs, apply_operator, rtol, dp, resnorm)
-   if (allocated(kernel_error)) then
-      call move_alloc(kernel_error, error)
-      return
-   end if
    !>-- written to fail for a NaN residual as well
    if (.not.(resnorm < rtol)) then
       call fatal_error(error, "Coupled-perturbed equations did not converge")
@@ -103,14 +93,9 @@ contains
       !> Image of the trial vector
       real(wp), intent(out) :: y(:, :, :)
 
-      type(error_type), allocatable :: local_error
-
       call get_response_moments(calc, ints, x, wfn_k)
       call pot%reset
-      call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_k, pot, local_error, kat)
-      if (allocated(local_error) .and. .not.allocated(kernel_error)) then
-         call move_alloc(local_error, kernel_error)
-      end if
+      call kernel%get_potential(wfn_k, pot)
       call get_fock_response(calc, ints, pot, fock)
       call density_response(wfn, fock(:, :, 1), y(:, :, 1))
       y(:, :, :) = x - y

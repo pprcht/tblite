@@ -23,7 +23,7 @@ module tblite_hessian_solvation_kernel
    use mctc_env, only : wp
    use mctc_io, only : structure_type
    use tblite_hessian_pair, only : get_pair_block, add_pair_hessian
-   use tblite_solvation_alpb, only : born_kernel
+   use tblite_solvation_born, only : born_kernel
    implicit none
    private
 

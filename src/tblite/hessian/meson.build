@@ -16,15 +16,10 @@
 subdir('solvation')
 
 srcs += files(
-  'coulomb.f90',
-  'dispersion.f90',
-  'halogen.f90',
   'hamiltonian.f90',
   'multipole.f90',
   'pair.f90',
   'polarizability.f90',
   'reference.f90',
-  'repulsion.f90',
-  'solvation.f90',
   'xtb.f90',
 )

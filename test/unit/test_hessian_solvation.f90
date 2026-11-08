@@ -22,8 +22,6 @@ module test_hessian_solvation
    use mstore, only : get_structure
    use tblite_adjlist, only : adjacency_list, new_adjacency_list
    use tblite_container, only : container_cache, container_type
-   use tblite_hessian_solvation, only : solvation_kernel, new_solvation_kernel, &
-      & get_solvation_potential, get_solvation_potential_derivative, get_solvation_hessian
    use tblite_hessian_solvation_born, only : add_psi_hessian, add_born_radii_hessian
    use tblite_hessian_solvation_cm5, only : add_cm5_hessian
    use tblite_hessian_solvation_coupling, only : add_born_coupling_hessian
@@ -34,6 +32,7 @@ module test_hessian_solvation
       & get_adet_deriv
    use tblite_solvation_born, only : born_integrator, new_born_integrator, compute_psi
    use tblite_solvation_cm5, only : get_cm5_charges
+   use tblite_response_type, only : kernel_type, new_kernel, response_type, new_response
    use tblite_scf_potential, only : potential_type, new_potential
    use tblite_solvation, only : solvation_input, cds_input, shift_input, solvent_data, &
       & get_solvent_data, new_solvation, new_solvation_cds, new_solvation_shift, &
@@ -582,14 +581,20 @@ subroutine test_kernel_gen(error, method, alpb, kernel)
 
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
-   type(solvation_kernel) :: solv
+   type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
+   type(kernel_type) :: kern
    integer :: iat
    real(wp), allocatable :: qat(:), vzero(:), vat(:), kmat(:, :)
 
    call get_structure(mol, "MB16-43", "01")
    call get_solvated_calculator(calc, mol, method, alpb, kernel, error)
    if (allocated(error)) return
-   call new_solvation_kernel(solv, mol, calc, error)
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, 0.0_wp)
+   wfn%qat(:, 1) = get_charges(mol%nat)
+   call calc%interactions%update(mol, cache)
+   call new_kernel(kern, mol, calc%bas, calc%variable_info())
+   call calc%interactions%get_response_kernel(mol, cache, wfn, kern, error)
    if (allocated(error)) return
 
    allocate(qat(mol%nat), vzero(mol%nat), vat(mol%nat), kmat(mol%nat, mol%nat))
@@ -602,9 +607,9 @@ subroutine test_kernel_gen(error, method, alpb, kernel)
       kmat(:, iat) = vat - vzero
    end do
 
-   if (any(abs(solv%kmat - kmat) > thr)) then
+   if (any(abs(kern%kat - kmat) > thr)) then
       call test_failed(error, "Response kernel does not match the containers")
-      print "(a, es12.4)", "max. deviation:", maxval(abs(solv%kmat - kmat))
+      print "(a, es12.4)", "max. deviation:", maxval(abs(kern%kat - kmat))
    end if
 end subroutine test_kernel_gen
 
@@ -625,8 +630,9 @@ end subroutine test_kernel_gfn1_gbsa
 
 subroutine test_potential_gen(error, method, alpb, kernel)
    !***********************************
-   !* Compare the potential at fixed charges against the containers and its
-   !* derivative w.r.t. the positions against finite differences.
+   !* Compare the derivative of the potential w.r.t. the positions at fixed
+   !* charges and its contraction with a set of moments against finite
+   !* differences of the potential of the containers.
    !***********************************
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
@@ -639,31 +645,33 @@ subroutine test_potential_gen(error, method, alpb, kernel)
 
    type(structure_type) :: mol, displ
    type(xtb_calculator) :: calc
-   type(solvation_kernel) :: solv
-   integer :: iat, ic
-   real(wp), allocatable :: qat(:), vat(:), vref(:), vr(:), vl(:)
-   real(wp), allocatable :: dvat(:, :, :), numdv(:, :, :)
+   type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
+   type(response_type) :: response
+   integer :: iat, ic, ix
+   real(wp), allocatable :: qat(:), mom(:), vr(:), vl(:), dvat(:, :, :), numdv(:, :, :)
+   real(wp), allocatable :: contr(:, :, :), numcontr(:, :, :)
 
    call get_structure(mol, "MB16-43", "01")
    call get_solvated_calculator(calc, mol, method, alpb, kernel, error)
    if (allocated(error)) return
-   call new_solvation_kernel(solv, mol, calc, error)
-   if (allocated(error)) return
 
    qat = get_charges(mol%nat)
    qat(3) = qat(3) - 1.0_wp
-   allocate(vat(mol%nat), vref(mol%nat), vr(mol%nat), vl(mol%nat))
-   allocate(dvat(mol%nat, 3, mol%nat), numdv(mol%nat, 3, mol%nat))
+   mom = [(cos(real(iat, wp)), iat = 1, mol%nat)]
+   allocate(vr(mol%nat), vl(mol%nat), numdv(mol%nat, 3, mol%nat))
 
-   call get_solvation_potential(solv, qat, vat)
-   call get_container_potential(calc, mol, qat, vref)
-   if (any(abs(vat - vref) > thr)) then
-      call test_failed(error, "Potential does not match the containers")
-      print "(a, es12.4)", "max. deviation:", maxval(abs(vat - vref))
-      return
-   end if
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, 0.0_wp)
+   wfn%qat(:, 1) = qat
+   call calc%interactions%update(mol, cache)
+   call new_response(response, mol, calc%bas, [(ix, ix = 1, 3*mol%nat)])
+   do ix = 1, 3*mol%nat
+      response%qat(:, ix) = mom
+   end do
+   call calc%interactions%get_response_derivative(mol, cache, wfn, response, error)
+   if (allocated(error)) return
+   dvat = reshape(response%vat, [mol%nat, 3, mol%nat])
 
-   call get_solvation_potential_derivative(solv, mol, qat, dvat)
    displ = mol
    do iat = 1, mol%nat
       do ic = 1, 3
@@ -681,6 +689,21 @@ subroutine test_potential_gen(error, method, alpb, kernel)
       call test_failed(error, "Potential derivative does not match finite differences")
       print "(a, es12.4)", "max. deviation:", maxval(abs(dvat - numdv))
       print "(a, es12.4)", "max. element:  ", maxval(abs(numdv))
+      return
+   end if
+
+   !>-- every column contracts the same moments with the derivative
+   contr = reshape(response%hessian(:, :, 1), [3, mol%nat, 1])
+   allocate(numcontr(3, mol%nat, 1))
+   do iat = 1, mol%nat
+      do ic = 1, 3
+         numcontr(ic, iat, 1) = sum(mom*numdv(:, ic, iat))
+      end do
+   end do
+   if (any(abs(contr - numcontr) > 1.0e-7_wp*maxval(abs(numcontr)))) then
+      call test_failed(error, "Contraction does not match finite differences")
+      print "(a, es12.4)", "max. deviation:", maxval(abs(contr - numcontr))
+      print "(a, es12.4)", "max. element:  ", maxval(abs(numcontr))
    end if
 end subroutine test_potential_gen
 
@@ -724,19 +747,22 @@ subroutine test_hessian_gen(error, method, alpb, kernel, charge)
 
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
-   type(solvation_kernel) :: solv
+   type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
    real(wp), allocatable :: qat(:), hessian(:, :), numhess(:, :)
 
    call get_structure(mol, "MB16-43", "01")
    call get_solvated_calculator(calc, mol, method, alpb, kernel, error)
    if (allocated(error)) return
-   call new_solvation_kernel(solv, mol, calc, error)
-   if (allocated(error)) return
 
    qat = get_charges(mol%nat)
    qat(5) = qat(5) + charge
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, 0.0_wp)
+   wfn%qat(:, 1) = qat
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat), source=0.0_wp)
-   call get_solvation_hessian(solv, mol, qat, hessian)
+   call calc%interactions%update(mol, cache)
+   call calc%interactions%get_hessian(mol, cache, wfn, hessian, error)
+   if (allocated(error)) return
    call get_numerical_hessian(mol, get_gradient, numhess)
    !>-- the surface area limits the accuracy of the finite differences
    call compare_hessian(error, hessian, numhess, 1.0e-7_wp*maxval(abs(numhess)))

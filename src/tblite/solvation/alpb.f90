@@ -28,10 +28,18 @@ module tblite_solvation_alpb
    use tblite_blas, only : dot, gemv, symv
    use tblite_container_cache, only : container_cache
    use tblite_mesh_lebedev, only : grid_size, get_angular_grid, list_bisection
-   use tblite_partition, only : work_partition, owns_index, owns_pair
+   use tblite_partition, only : work_partition, owns_index, owns_pair, &
+      & serial_work_partition, operator(==)
    use tblite_scf_info, only : scf_info, atom_resolved
    use tblite_scf_potential, only : potential_type
-   use tblite_solvation_born, only : born_integrator, new_born_integrator
+   use tblite_hessian_solvation_born, only : add_born_radii_hessian
+   use tblite_hessian_solvation_cm5, only : add_cm5_coupling_hessian
+   use tblite_hessian_solvation_coupling, only : add_born_coupling_hessian
+   use tblite_hessian_solvation_kernel, only : get_kernel_derivs, get_radii_combination, &
+      & add_born_kernel_hessian
+   use tblite_hessian_solvation_shape, only : add_shape_hessian
+   use tblite_response_type, only : kernel_type, response_type
+   use tblite_solvation_born, only : born_integrator, new_born_integrator, born_kernel
    use tblite_solvation_cm5, only : get_cm5_charges
    use tblite_solvation_data, only : get_vdw_rad_cosmo
    use tblite_solvation_type, only : solvation_type
@@ -43,17 +51,6 @@ module tblite_solvation_alpb
    public :: born_kernel
    public :: add_born_mat_p16, add_born_mat_still, get_adet, get_adet_deriv
 
-
-   !> Possible Born interaction kernels
-   type :: enum_born_kernel
-      !> Classical Still kernel
-      integer :: still = 1
-      !> P16 kernel by Lange (JCTC 2012, 8, 1999-2011)
-      integer :: p16 = 2
-   end type enum_born_kernel
-
-   !> Actual enumerator for the generalized Born kernels
-   type(enum_born_kernel), parameter :: born_kernel = enum_born_kernel()
 
 
    !> Input for ALPB solvation
@@ -104,6 +101,12 @@ module tblite_solvation_alpb
       procedure :: get_potential
       !> Get solvation gradient
       procedure :: get_gradient
+      !> Evaluate second derivative w.r.t. the charges
+      procedure :: get_response_kernel
+      !> Evaluate mixed second derivative w.r.t. the charges and positions
+      procedure :: get_response_derivative
+      !> Evaluate second derivative w.r.t. the positions at fixed charges
+      procedure :: get_hessian
    end type alpb_solvation
 
    !> Provide constructor for ALPB solvation
@@ -386,6 +389,250 @@ subroutine get_gradient(self, mol, cache, wfn, gradient, sigma)
    end if
 
 end subroutine get_gradient
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the generalized Born matrix J, including the ALPB shape correction,
+   !* to the atomic kernel. The energy is quadratic in the charges, hence the
+   !* derivative along a change of the state vanishes.
+   !***********************************
+   !> Instance of the solvation model
+   class(alpb_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   type(alpb_cache), pointer :: ptr
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+   if (present(dwfn)) return
+
+   call view(cache, ptr)
+   kernel%kat(:, :) = kernel%kat + ptr%jmat
+end subroutine get_response_kernel
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
+   !***********************************
+   !* Mixed second derivative of the Born energy w.r.t. the charges and the
+   !* atomic positions. The potential v = J Q acts on the charges Q = q + c
+   !* shifted by the CM5 corrections c(R), hence at fixed q
+   !*   dv/dR = dJ/dR Q + J dc/dR.
+   !* With dwfn, the derivative of J applied to the first-order charges is
+   !* evaluated instead, which carries no CM5 shift.
+   !***********************************
+   !> Instance of the solvation model
+   class(alpb_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   type(alpb_cache), pointer :: ptr
+   real(wp), allocatable :: xat(:)
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+
+   call view(cache, ptr)
+   if (present(dwfn)) then
+      xat = dwfn%qat(:, 1)
+   else
+      xat = wfn%qat(:, 1)
+      if (self%useCM5) xat(:) = xat + ptr%cm5
+   end if
+   call add_born_derivative(self, mol, ptr, xat, response%coord, response%qat, &
+      & response%vat, response%hessian, self%useCM5 .and. .not.present(dwfn))
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian of the Born energy E = 1/2 Q^T J(R, a(R)) Q at fixed
+   !* charges q, with Q = q + c(R) for the CM5 variant. The pair terms at
+   !* fixed Born radii a, their coupling to the radii, the second derivative
+   !* of the radii and the shape correction act on Q. The CM5 shift adds the
+   !* terms with the derivatives of c.
+   !***********************************
+   !> Instance of the solvation model
+   class(alpb_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: nat, ix
+   type(alpb_cache), pointer :: ptr
+   real(wp), allocatable :: qeff(:), dEda(:), vat(:), mom(:, :), vtmp(:, :), cmat(:, :, :)
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+
+   call view(cache, ptr)
+   nat = mol%nat
+   qeff = wfn%qat(:, 1)
+   if (self%useCM5) qeff(:) = qeff + ptr%cm5
+
+   allocate(dEda(nat))
+   call add_born_kernel_hessian(mol, self%kernel, self%keps, qeff, ptr%rad, hessian)
+   call add_born_coupling_hessian(mol, self%kernel, self%keps, qeff, ptr%rad, &
+      & ptr%draddr, hessian, dEda)
+   call add_born_radii_hessian(self%gbobc, mol, dEda, hessian)
+   call add_shape_hessian(mol, self%gbobc%vdwr, self%keps*self%alpbet, sum(qeff), hessian)
+
+   if (self%useCM5) then
+      !>-- contract the derivative of the potential with the CM5 derivatives
+      allocate(vat(nat), vtmp(nat, 3*nat), cmat(3, nat, 3*nat), source=0.0_wp)
+      call symv(ptr%jmat, qeff, vat)
+      mom = transpose(reshape(ptr%dcm5dr, [3*nat, nat]))
+      call add_born_derivative(self, mol, ptr, qeff, [(ix, ix = 1, 3*nat)], mom, vtmp, &
+         & cmat, .true.)
+      call add_cm5_coupling_hessian(mol, vat, ptr%dcm5dr, ptr%jmat, &
+         & reshape(cmat, [3*nat, 3*nat]), hessian)
+   end if
+end subroutine get_hessian
+
+
+subroutine add_born_derivative(self, mol, ptr, xat, coord, mom, vat, hessian, shifted)
+   !***********************************
+   !* Derivative of the Born potential v = J x w.r.t. the atomic positions at
+   !* fixed x. For each perturbed coordinate the derivative of v is added to
+   !* vat, its contraction with the moments mom to hessian. J depends on the
+   !* positions directly, via the Born radii a and via the shape correction.
+   !* The radii part is collected in W_AX = sum_C dJ_AC/da_X x_C and
+   !* contracted with the derivatives of the radii. With shifted, the term
+   !* J dc/dR of the CM5 corrections is added as well.
+   !***********************************
+   !> Instance of the solvation model
+   class(alpb_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data of the Born model
+   type(alpb_cache), intent(in) :: ptr
+   !> Charges the Born matrix acts on
+   real(wp), intent(in) :: xat(:)
+   !> Perturbed coordinates 3*(iat-1)+ic
+   integer, intent(in) :: coord(:)
+   !> Moments contracted with the derivative of the potential, nat x npert
+   real(wp), intent(in) :: mom(:, :)
+   !> Derivative of the potential w.r.t. each perturbed coordinate
+   real(wp), intent(inout) :: vat(:, :)
+   !> Contraction of the moments with the derivative of the potential
+   real(wp), intent(inout) :: hessian(:, :, :)
+   !> Include the derivative of the CM5 corrections
+   logical, intent(in) :: shifted
+
+   integer :: nat, np, iat, jat, ip
+   integer, allocatable :: kat(:), kc(:)
+   real(wp) :: vec(3), r1, ehat(3), rho, da, db, daa, dab, dbb
+   real(wp) :: dr, drho, drr, drrho, drhorho, gi(3), gj(3), xtot
+   real(wp), allocatable :: wmat(:, :), dkshape(:, :), qunit(:)
+
+   nat = mol%nat
+   np = size(coord)
+   kat = (coord - 1)/3 + 1
+   kc = coord - 3*(kat - 1)
+   allocate(wmat(nat, nat), dkshape(3, nat), source=0.0_wp)
+
+   do iat = 1, nat
+      do jat = 1, iat - 1
+         vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat)
+         r1 = norm2(vec)
+         ehat(:) = vec / r1
+         call get_radii_combination(self%kernel, ptr%rad(iat), ptr%rad(jat), &
+            & rho, da, db, daa, dab, dbb)
+         call get_kernel_derivs(self%kernel, r1, rho, dr, drho, drr, drrho, drhorho)
+         dr = self%keps*dr
+         wmat(iat, iat) = wmat(iat, iat) + self%keps*drho*da*xat(jat)
+         wmat(iat, jat) = wmat(iat, jat) + self%keps*drho*db*xat(jat)
+         wmat(jat, iat) = wmat(jat, iat) + self%keps*drho*da*xat(iat)
+         wmat(jat, jat) = wmat(jat, jat) + self%keps*drho*db*xat(iat)
+
+         !>-- direct distance dependence of v_iat (gi) and v_jat (gj)
+         gi(:) = dr*xat(jat)*ehat
+         gj(:) = dr*xat(iat)*ehat
+         do ip = 1, np
+            hessian(:, iat, ip) = hessian(:, iat, ip) + mom(iat, ip)*gi + mom(jat, ip)*gj
+            hessian(:, jat, ip) = hessian(:, jat, ip) - mom(iat, ip)*gi - mom(jat, ip)*gj
+            if (kat(ip) == iat) then
+               vat(iat, ip) = vat(iat, ip) + gi(kc(ip))
+               vat(jat, ip) = vat(jat, ip) + gj(kc(ip))
+            else if (kat(ip) == jat) then
+               vat(iat, ip) = vat(iat, ip) - gi(kc(ip))
+               vat(jat, ip) = vat(jat, ip) - gj(kc(ip))
+            end if
+         end do
+      end do
+      wmat(iat, iat) = wmat(iat, iat) - self%keps*xat(iat)/ptr%rad(iat)**2
+   end do
+
+   !>-- the shape correction keps alpbet / A_det enters every element of J
+   if (self%alpbet > 0.0_wp) then
+      allocate(qunit(nat), source=0.0_wp)
+      qunit(1) = 1.0_wp
+      call get_adet_deriv(nat, mol%xyz, self%gbobc%vdwr, self%keps*self%alpbet, qunit, &
+         & dkshape)
+      dkshape(:, :) = 2*dkshape
+   end if
+   xtot = sum(xat)
+
+   do ip = 1, np
+      vat(:, ip) = vat(:, ip) + matmul(wmat, ptr%draddr(kc(ip), kat(ip), :)) &
+         & + xtot*dkshape(kc(ip), kat(ip))
+      call gemv(ptr%draddr, matmul(mom(:, ip), wmat), hessian(:, :, ip), beta=1.0_wp)
+      hessian(:, :, ip) = hessian(:, :, ip) + sum(mom(:, ip))*xtot*dkshape
+      if (shifted) then
+         vat(:, ip) = vat(:, ip) + matmul(ptr%jmat, ptr%dcm5dr(kc(ip), kat(ip), :))
+         call gemv(ptr%dcm5dr, matmul(ptr%jmat, mom(:, ip)), hessian(:, :, ip), &
+            & beta=1.0_wp)
+      end if
+   end do
+end subroutine add_born_derivative
+
+
+subroutine check_second_derivatives(self, error)
+   !***********************************
+   !* Analytic second derivatives need the P16 or Still kernel and the
+   !* complete Born matrix of a serial calculation.
+   !***********************************
+   !> Instance of the solvation model
+   class(alpb_solvation), intent(in) :: self
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   if (.not.(self%partition == serial_work_partition)) then
+      call fatal_error(error, "Analytic second derivatives with solvation require "// &
+         & "a serial calculation")
+   else if (self%kernel /= born_kernel%p16 .and. self%kernel /= born_kernel%still) then
+      call fatal_error(error, "Analytic second derivatives are not available "// &
+         & "for this generalized Born kernel")
+   end if
+end subroutine check_second_derivatives
 
 
 !> Return dependency on density

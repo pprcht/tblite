@@ -19,15 +19,19 @@
 
 !> Isotropic second-order electrostatics using an effective Coulomb operator
 module tblite_coulomb_charge_effective
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
    use mctc_io_constants, only : pi
    use mctc_io_math, only : matdet_3x3, matinv_3x3
+   use tblite_container_cache, only : container_cache
    use tblite_coulomb_cache, only : coulomb_cache
    use tblite_coulomb_charge_type, only : coulomb_charge_type
    use tblite_coulomb_ewald, only : get_dir_cutoff, get_rec_cutoff
    use tblite_cutoff, only : get_lattice_points
+   use tblite_hessian_pair, only : get_pair_block, add_pair_hessian
    use tblite_partition, only : work_partition, owns_pair
+   use tblite_response_type, only : response_type
+   use tblite_wavefunction_type, only : wavefunction_type
    use tblite_wignerseitz, only : wignerseitz_cell, get_wignerseitz_weights
    implicit none
    private
@@ -47,6 +51,10 @@ module tblite_coulomb_charge_effective
       procedure :: get_coulomb_matrix
       !> Evaluate uncontracted derivatives of Coulomb matrix
       procedure :: get_coulomb_derivs
+      !> Evaluate mixed second derivative w.r.t. the charges and positions
+      procedure :: get_response_derivative
+      !> Evaluate second derivative w.r.t. the positions at fixed charges
+      procedure :: get_hessian
    end type effective_coulomb
 
 
@@ -673,6 +681,174 @@ subroutine get_coulomb_derivs(self, mol, cache, qat, qsh, dadr, dadL, atrace)
     end if
 
 end subroutine get_coulomb_derivs
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
+   !***********************************
+   !* Mixed second derivative of the isotropic electrostatic energy w.r.t.
+   !* the charges and the atomic positions. Each pair adds the derivative of
+   !* its potential w.r.t. a perturbed coordinate on one of its atoms and the
+   !* contraction of the first-order charges with the derivative of its
+   !* potential. The energy is quadratic in the charges, with dwfn the
+   !* potential of the first-order charges is differentiated instead.
+   !* Only available for molecular systems.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(effective_coulomb), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   integer :: iat, jat, izp, jzp, ii, jj, ish, jsh, ip, kat, kc
+   real(wp) :: vec(3), r1, dgam, d2gam, dg(3), qq
+   real(wp), allocatable :: qvec(:), mvec(:, :), vvec(:, :)
+
+   if (any(mol%periodic)) then
+      call fatal_error(error, "Analytic second derivatives of the electrostatics are "// &
+         & "only available for molecular systems")
+      return
+   end if
+
+   if (self%shell_resolved) then
+      qvec = wfn%qsh(:, 1)
+      if (present(dwfn)) qvec = dwfn%qsh(:, 1)
+      mvec = response%qsh
+   else
+      qvec = wfn%qat(:, 1)
+      if (present(dwfn)) qvec = dwfn%qat(:, 1)
+      mvec = response%qat
+   end if
+   allocate(vvec(size(mvec, 1), size(mvec, 2)), source=0.0_wp)
+
+   do iat = 1, mol%nat
+      izp = mol%id(iat)
+      ii = self%offset(iat)
+      do jat = 1, iat - 1
+         jzp = mol%id(jat)
+         jj = self%offset(jat)
+         vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat)
+         r1 = norm2(vec)
+         do ish = 1, self%nshell(iat)
+            do jsh = 1, self%nshell(jat)
+               call get_gamma_derivs(r1, self%gexp, self%hubbard(jsh, ish, jzp, izp), &
+                  & dgam, d2gam)
+               !>-- derivative of the pair kernel w.r.t. the position of iat
+               dg(:) = dgam * vec / r1
+               do ip = 1, size(response%coord)
+                  qq = mvec(ii+ish, ip)*qvec(jj+jsh) + qvec(ii+ish)*mvec(jj+jsh, ip)
+                  response%hessian(:, iat, ip) = response%hessian(:, iat, ip) + qq*dg
+                  response%hessian(:, jat, ip) = response%hessian(:, jat, ip) - qq*dg
+
+                  kat = (response%coord(ip) - 1)/3 + 1
+                  kc = response%coord(ip) - 3*(kat - 1)
+                  if (kat == iat) then
+                     vvec(ii+ish, ip) = vvec(ii+ish, ip) + dg(kc)*qvec(jj+jsh)
+                     vvec(jj+jsh, ip) = vvec(jj+jsh, ip) + dg(kc)*qvec(ii+ish)
+                  else if (kat == jat) then
+                     vvec(ii+ish, ip) = vvec(ii+ish, ip) - dg(kc)*qvec(jj+jsh)
+                     vvec(jj+jsh, ip) = vvec(jj+jsh, ip) - dg(kc)*qvec(ii+ish)
+                  end if
+               end do
+            end do
+         end do
+      end do
+   end do
+
+   if (self%shell_resolved) then
+      response%vsh(:, :) = response%vsh + vvec
+   else
+      response%vat(:, :) = response%vat + vvec
+   end if
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian of the isotropic electrostatic energy at fixed charges,
+   !* E = 1/2 sum q_i gamma_ij(r) q_j with the Klopman-Ohno kernel
+   !* gamma = (r**g + eta**(-g))**(-1/g). Only available for molecular systems.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(effective_coulomb), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: iat, jat, izp, jzp, ii, jj, ish, jsh
+   real(wp) :: vec(3), r1, dgam, d2gam, qq, block(3, 3)
+   real(wp), allocatable :: qvec(:)
+
+   if (any(mol%periodic)) then
+      call fatal_error(error, "Analytic second derivatives of the electrostatics are "// &
+         & "only available for molecular systems")
+      return
+   end if
+
+   if (self%shell_resolved) then
+      qvec = wfn%qsh(:, 1)
+   else
+      qvec = wfn%qat(:, 1)
+   end if
+
+   do iat = 1, mol%nat
+      izp = mol%id(iat)
+      ii = self%offset(iat)
+      do jat = 1, iat - 1
+         jzp = mol%id(jat)
+         jj = self%offset(jat)
+         vec(:) = mol%xyz(:, iat) - mol%xyz(:, jat)
+         r1 = norm2(vec)
+         do ish = 1, self%nshell(iat)
+            do jsh = 1, self%nshell(jat)
+               call get_gamma_derivs(r1, self%gexp, self%hubbard(jsh, ish, jzp, izp), &
+                  & dgam, d2gam)
+               qq = qvec(ii+ish) * qvec(jj+jsh)
+               call get_pair_block(qq*dgam, qq*d2gam, r1, vec, block)
+               call add_pair_hessian(hessian, iat, jat, block)
+            end do
+         end do
+      end do
+   end do
+end subroutine get_hessian
+
+
+pure subroutine get_gamma_derivs(r1, gexp, eta, dgam, d2gam)
+   !***********************************
+   !* First and second derivative of the Klopman-Ohno kernel
+   !* gamma = (r**g + eta**(-g))**(-1/g) w.r.t. the distance.
+   !***********************************
+   !> Distance between the atoms
+   real(wp), intent(in) :: r1
+   !> Exponent of the kernel
+   real(wp), intent(in) :: gexp
+   !> Averaged Hubbard parameter of the shell pair
+   real(wp), intent(in) :: eta
+   !> First and second derivative of the kernel
+   real(wp), intent(out) :: dgam, d2gam
+
+   real(wp) :: u
+
+   u = r1**gexp + eta**(-gexp)
+   dgam = -r1**(gexp - 1.0_wp) * u**(-1.0_wp/gexp - 1.0_wp)
+   d2gam = -(gexp - 1.0_wp) * r1**(gexp - 2.0_wp) * u**(-1.0_wp/gexp - 1.0_wp) &
+      & + (gexp + 1.0_wp) * r1**(2*gexp - 2.0_wp) * u**(-1.0_wp/gexp - 2.0_wp)
+end subroutine get_gamma_derivs
 
 
 !> Evaluate uncontracted derivatives of Coulomb matrix for finite system

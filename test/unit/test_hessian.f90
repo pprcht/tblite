@@ -22,13 +22,7 @@ module test_hessian
    use mstore, only : get_structure
    use tblite_container, only : container_cache
    use tblite_context_type, only : context_type
-   use tblite_hessian_dispersion, only : get_dispersion_hessian, &
-      & get_dispersion_potential_derivative
-   use tblite_hessian_multipole, only : get_multipole_hessian, &
-      & get_multipole_potential_derivative
    use tblite_hessian_polarizability, only : xtb_polarizability_gradient
-   use tblite_hessian_repulsion, only : get_repulsion_hessian
-   use tblite_hessian_solvation, only : check_solvation_support
    use tblite_hessian_xtb, only : xtb_hessian
    use tblite_partition, only : work_partition, new_work_partition
    use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
@@ -36,6 +30,7 @@ module test_hessian
       & new_solvation_cds, new_solvation_shift, solvation_type
    use tblite_container, only : container_type, container_list
    use tblite_response_polarizability, only : xtb_polarizability
+   use tblite_response_type, only : kernel_type, new_kernel, response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
@@ -92,9 +87,9 @@ subroutine collect_hessian(testsuite)
       new_unittest("solvation-support-alpb", test_solvation_support_alpb), &
       new_unittest("solvation-support-gbsa", test_solvation_support_gbsa), &
       new_unittest("unsupported-solvation-ddx", test_unsupported_solvation_ddx), &
-      new_unittest("unsupported-solvation-cm5", test_unsupported_solvation_cm5), &
+      new_unittest("solvation-support-cm5-mixed", test_solvation_support_cm5_mixed), &
       new_unittest("unsupported-solvation-partition", test_unsupported_solvation_partition), &
-      new_unittest("unsupported-solvation-duplicate", test_unsupported_solvation_duplicate), &
+      new_unittest("solvation-support-duplicate", test_solvation_support_duplicate), &
       new_unittest("gfn2-hessian-alpb", test_hessian_gfn2_alpb), &
       new_unittest("gfn2-hessian-gbsa", test_hessian_gfn2_gbsa), &
       new_unittest("gfn1-hessian-alpb", test_hessian_gfn1_alpb), &
@@ -170,11 +165,14 @@ subroutine test_repulsion_gen(error, mol, calc)
    !> Single-point calculator
    type(xtb_calculator), intent(in) :: calc
 
+   type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
    real(wp), allocatable :: hessian(:, :), numhess(:, :)
 
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
    hessian(:, :) = 0.0_wp
-   call get_repulsion_hessian(calc%repulsion, mol, hessian)
+   call calc%repulsion%get_hessian(mol, cache, wfn, hessian, error)
+   if (allocated(error)) return
    call get_numerical_hessian(mol, get_gradient, numhess)
    call compare_hessian(error, hessian, numhess)
 
@@ -240,6 +238,7 @@ subroutine test_dispersion_gen(error, mol, calc)
 
    integer :: iat
    type(wavefunction_type) :: wfn
+   type(container_cache) :: dcache
    real(wp), allocatable :: hessian(:, :), numhess(:, :)
 
    call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
@@ -249,7 +248,8 @@ subroutine test_dispersion_gen(error, mol, calc)
 
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
    hessian(:, :) = 0.0_wp
-   call get_dispersion_hessian(calc%dispersion, mol, wfn%qat(:, 1), hessian, error)
+   call calc%dispersion%update(mol, dcache)
+   call calc%dispersion%get_hessian(mol, dcache, wfn, hessian, error)
    if (allocated(error)) return
    call get_numerical_hessian(mol, get_gradient, numhess)
    call compare_hessian(error, hessian, numhess)
@@ -311,11 +311,13 @@ subroutine test_dispersion_potential(error)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   integer :: iat, ic
+   integer :: iat, ic, ix
    type(structure_type) :: mol, displ
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
    type(potential_type) :: potr, potl
+   type(container_cache) :: dcache
+   type(response_type) :: response
    real(wp), allocatable :: dvat(:, :, :), nvat(:, :, :)
    real(wp), parameter :: step = 1.0e-4_wp
 
@@ -327,9 +329,12 @@ subroutine test_dispersion_potential(error)
    call new_potential(potr, mol, calc%bas, 1)
    call new_potential(potl, mol, calc%bas, 1)
 
-   allocate(dvat(mol%nat, 3, mol%nat), nvat(mol%nat, 3, mol%nat))
-   call get_dispersion_potential_derivative(calc%dispersion, mol, wfn%qat(:, 1), dvat, error)
+   allocate(nvat(mol%nat, 3, mol%nat))
+   call calc%dispersion%update(mol, dcache)
+   call new_response(response, mol, calc%bas, [(ix, ix = 1, 3*mol%nat)])
+   call calc%dispersion%get_response_derivative(mol, dcache, wfn, response, error)
    if (allocated(error)) return
+   dvat = reshape(response%vat, [mol%nat, 3, mol%nat])
 
    displ = mol
    do iat = 1, mol%nat
@@ -394,6 +399,7 @@ subroutine test_multipole_hessian(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
+   type(container_cache) :: mcache
    real(wp), allocatable :: hessian(:, :), numhess(:, :)
 
    call get_structure(mol, "MB16-43", "06")
@@ -404,8 +410,9 @@ subroutine test_multipole_hessian(error)
 
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
    hessian(:, :) = 0.0_wp
-   call get_multipole_hessian(calc%coulomb%aes2, mol, wfn%qat(:, 1), wfn%dpat(:, :, 1), &
-      & wfn%qpat(:, :, 1), hessian)
+   call calc%coulomb%aes2%update(mol, mcache)
+   call calc%coulomb%aes2%get_hessian(mol, mcache, wfn, hessian, error)
+   if (allocated(error)) return
    call get_numerical_hessian(mol, get_gradient, numhess)
    call compare_hessian(error, hessian, numhess)
 
@@ -434,11 +441,13 @@ subroutine test_multipole_potential(error)
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
-   integer :: iat, ic
+   integer :: iat, ic, ix
    type(structure_type) :: mol, displ
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
    type(potential_type) :: potr, potl
+   type(container_cache) :: mcache
+   type(response_type) :: response
    real(wp), allocatable :: dvat(:, :, :), dvdp(:, :, :, :), dvqp(:, :, :, :)
    real(wp), allocatable :: nvat(:, :, :), nvdp(:, :, :, :), nvqp(:, :, :, :)
    real(wp), parameter :: step = 1.0e-4_wp
@@ -451,11 +460,15 @@ subroutine test_multipole_potential(error)
    call new_potential(potr, mol, calc%bas, 1)
    call new_potential(potl, mol, calc%bas, 1)
 
-   allocate(dvat(mol%nat, 3, mol%nat), dvdp(3, mol%nat, 3, mol%nat), &
-      & dvqp(6, mol%nat, 3, mol%nat), nvat(mol%nat, 3, mol%nat), &
-      & nvdp(3, mol%nat, 3, mol%nat), nvqp(6, mol%nat, 3, mol%nat))
-   call get_multipole_potential_derivative(calc%coulomb%aes2, mol, wfn%qat(:, 1), &
-      & wfn%dpat(:, :, 1), wfn%qpat(:, :, 1), dvat, dvdp, dvqp)
+   allocate(nvat(mol%nat, 3, mol%nat), nvdp(3, mol%nat, 3, mol%nat), &
+      & nvqp(6, mol%nat, 3, mol%nat))
+   call calc%coulomb%aes2%update(mol, mcache)
+   call new_response(response, mol, calc%bas, [(ix, ix = 1, 3*mol%nat)])
+   call calc%coulomb%aes2%get_response_derivative(mol, mcache, wfn, response, error)
+   if (allocated(error)) return
+   dvat = reshape(response%vat, [mol%nat, 3, mol%nat])
+   dvdp = reshape(response%vdp, [3, mol%nat, 3, mol%nat])
+   dvqp = reshape(response%vqp, [6, mol%nat, 3, mol%nat])
 
    displ = mol
    do iat = 1, mol%nat
@@ -872,23 +885,57 @@ subroutine add_solvation(calc, mol, input, method, error)
    end if
 end subroutine add_solvation
 
-subroutine check_rejected(calc, error)
+subroutine check_rejected(calc, mol, error)
    !***********************************
    !* Expect the support check to reject the calculator, such that a failure
    !* while setting up the test cannot pass for the rejection.
    !***********************************
    !> Single-point calculator
    type(xtb_calculator), intent(in) :: calc
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
 
    type(error_type), allocatable :: reject
 
-   call check_solvation_support(calc, reject)
+   call check_solvation_support(calc, mol, reject)
    if (.not.allocated(reject)) then
       call test_failed(error, "Unsupported solvation was not rejected")
    end if
 end subroutine check_rejected
+
+subroutine check_solvation_support(calc, mol, error)
+   !***********************************
+   !* Evaluate the response kernel, the derivative of the potential and the
+   !* Hessian of the interaction containers, which report an error for
+   !* models without analytic second derivatives.
+   !***********************************
+   !> Single-point calculator
+   type(xtb_calculator), intent(in) :: calc
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
+   type(kernel_type) :: kernel
+   type(response_type) :: response
+   real(wp), allocatable :: hessian(:, :)
+
+   call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call set_moments(wfn)
+   call calc%interactions%update(mol, cache)
+   call new_kernel(kernel, mol, calc%bas, calc%variable_info())
+   call calc%interactions%get_response_kernel(mol, cache, wfn, kernel, error)
+   if (allocated(error)) return
+   call new_response(response, mol, calc%bas, [1, 2, 3])
+   call calc%interactions%get_response_derivative(mol, cache, wfn, response, error)
+   if (allocated(error)) return
+   allocate(hessian(3*mol%nat, 3*mol%nat), source=0.0_wp)
+   call calc%interactions%get_hessian(mol, cache, wfn, hessian, error)
+end subroutine check_solvation_support
 
 subroutine get_parametrized_solvation(input, alpb, kernel)
    !> Solvation model input
@@ -921,7 +968,7 @@ subroutine test_solvation_support_alpb(error)
    call get_parametrized_solvation(input, .true., born_kernel%p16)
    call add_solvation(calc, mol, input, "gfn2", error)
    if (allocated(error)) return
-   call check_solvation_support(calc, error)
+   call check_solvation_support(calc, mol, error)
 
 end subroutine test_solvation_support_alpb
 
@@ -940,7 +987,7 @@ subroutine test_solvation_support_gbsa(error)
    call get_parametrized_solvation(input, .false., born_kernel%still)
    call add_solvation(calc, mol, input, "gfn1", error)
    if (allocated(error)) return
-   call check_solvation_support(calc, error)
+   call check_solvation_support(calc, mol, error)
 
 end subroutine test_solvation_support_gbsa
 
@@ -964,11 +1011,15 @@ subroutine test_unsupported_solvation_ddx(error)
       call test_failed(error, "Setting up the ddX container failed")
       return
    end if
-   call check_rejected(calc, error)
+   call check_rejected(calc, mol, error)
 
 end subroutine test_unsupported_solvation_ddx
 
-subroutine test_unsupported_solvation_cm5(error)
+subroutine test_solvation_support_cm5_mixed(error)
+   !***********************************
+   !* Each solvation container acts on its own charges, hence models that
+   !* differ in the CM5 shift can be combined.
+   !***********************************
 
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
@@ -990,9 +1041,9 @@ subroutine test_unsupported_solvation_cm5(error)
       call test_failed(error, "Setting up the solvation containers failed")
       return
    end if
-   call check_rejected(calc, error)
+   call check_solvation_support(calc, mol, error)
 
-end subroutine test_unsupported_solvation_cm5
+end subroutine test_solvation_support_cm5_mixed
 
 subroutine test_unsupported_solvation_partition(error)
 
@@ -1015,11 +1066,14 @@ subroutine test_unsupported_solvation_partition(error)
       return
    end if
    call calc%set_partition(partition)
-   call check_rejected(calc, error)
+   call check_rejected(calc, mol, error)
 
 end subroutine test_unsupported_solvation_partition
 
-subroutine test_unsupported_solvation_duplicate(error)
+subroutine test_solvation_support_duplicate(error)
+   !***********************************
+   !* The contributions of several solvation containers are additive.
+   !***********************************
 
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
@@ -1039,9 +1093,9 @@ subroutine test_unsupported_solvation_duplicate(error)
       call test_failed(error, "Setting up the solvation containers failed")
       return
    end if
-   call check_rejected(calc, error)
+   call check_solvation_support(calc, mol, error)
 
-end subroutine test_unsupported_solvation_duplicate
+end subroutine test_solvation_support_duplicate
 
 subroutine get_solvated_calculator(calc, mol, method, alpb, kernel, error)
    !> Single-point calculator

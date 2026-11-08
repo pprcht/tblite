@@ -195,14 +195,16 @@ subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
 end subroutine get_response_kernel
 
 
-subroutine get_response_derivative(self, mol, cache, wfn, response, error)
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
    !***********************************
    !* Mixed second derivative of the energy w.r.t. the charges and multipole
    !* moments and the atomic positions at the state in wfn. Added to response
    !* are its contraction with the perturbed coordinates (derivative of the
    !* potential at fixed moments) and with the first-order moments (response
-   !* part of the Hessian columns). The default covers interactions without
-   !* density dependence and reports an error for all others.
+   !* part of the Hessian columns). With dwfn, the same quantities for the
+   !* derivative of the kernel potential of dwfn are added instead.
+   !* The default covers interactions without density dependence and
+   !* reports an error for all others.
    !***********************************
    !> Instance of the interaction container
    class(container_type), intent(in) :: self
@@ -216,6 +218,8 @@ subroutine get_response_derivative(self, mol, cache, wfn, response, error)
    type(response_type), intent(inout) :: response
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
 
    if (uses_density(self%variable_info())) call missing_derivative(self, error)
 end subroutine get_response_derivative

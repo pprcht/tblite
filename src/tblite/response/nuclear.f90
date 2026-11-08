@@ -22,12 +22,11 @@
 module tblite_response_nuclear
    use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
-   use tblite_container, only : container_cache
    use tblite_integral_type, only : integral_type
    use tblite_response_cpscc, only : solve_cpscc, get_response_moments, &
       & get_fock_response
    use tblite_response_density, only : density_response, wdensity_response
-   use tblite_response_kernel, only : get_kernel_potential
+   use tblite_response_type, only : kernel_type
    use tblite_scf, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
    use tblite_xtb_calculator, only : xtb_calculator
@@ -38,8 +37,8 @@ module tblite_response_nuclear
 
 contains
 
-subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0, wfn_m, &
-      & dp, dw, pot, wfn_r, error, fock_r, kat)
+subroutine xtb_nuclear_response(mol, calc, wfn, ints, kernel, ds, fock0, wfn_m, dp, dw, &
+      & pot, wfn_r, error, fock_r)
    !***********************************
    !* Solve the coupled-perturbed equations for one Cartesian displacement.
    !* The perturbation enters via the derivative of the overlap ds and of
@@ -60,10 +59,8 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    type(wavefunction_type), intent(in) :: wfn
    !> Integrals at the current geometry
    type(integral_type), intent(in) :: ints
-   !> Cache of the electrostatic container
-   type(container_cache), intent(inout) :: ccache
-   !> Cache of the dispersion container
-   type(container_cache), intent(inout) :: dcache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
    !> Derivative of the overlap matrix
    real(wp), intent(in) :: ds(:, :)
    !> Derivative of the Hamiltonian at fixed charges and multipole moments
@@ -82,21 +79,18 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    type(error_type), allocatable, intent(out) :: error
    !> First-order Hamiltonian including the response of the potential
    real(wp), intent(out), optional :: fock_r(:, :)
-   !> Atom-resolved charge kernel of additional interactions
-   real(wp), intent(in), optional :: kat(:, :)
 
    real(wp), allocatable :: fock(:, :, :), rhs(:, :, :)
 
    allocate(fock(calc%bas%nao, calc%bas%nao, 1), rhs(calc%bas%nao, calc%bas%nao, 1))
 
    call pot%reset
-   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_m, pot, error, kat)
-   if (allocated(error)) return
+   call kernel%get_potential(wfn_m, pot)
    call get_fock_response(calc, ints, pot, fock)
    fock(:, :, 1) = fock(:, :, 1) + fock0
    call density_response(wfn, fock(:, :, 1), rhs(:, :, 1), ds)
 
-   call solve_cpscc(mol, calc, wfn, ints, ccache, dcache, rhs, dp, error, kat)
+   call solve_cpscc(mol, calc, wfn, ints, kernel, rhs, dp, error)
    if (allocated(error)) return
 
    call get_response_moments(calc, ints, dp, wfn_r)
@@ -106,8 +100,7 @@ subroutine xtb_nuclear_response(mol, calc, wfn, ints, ccache, dcache, ds, fock0,
    wfn_r%qpat(:, :, :) = wfn_r%qpat + wfn_m%qpat
 
    call pot%reset
-   call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_r, pot, error, kat)
-   if (allocated(error)) return
+   call kernel%get_potential(wfn_r, pot)
    call get_fock_response(calc, ints, pot, fock)
    fock(:, :, 1) = fock(:, :, 1) + fock0
    call wdensity_response(wfn, fock(:, :, 1), dw, ds)

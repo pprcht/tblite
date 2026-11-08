@@ -29,6 +29,18 @@ module tblite_solvation_born
 
    public :: new_born_integrator
    public :: compute_bornr, compute_psi
+   public :: born_kernel
+
+   !> Possible Born interaction kernels
+   type :: enum_born_kernel
+      !> Classical Still kernel
+      integer :: still = 1
+      !> P16 kernel by Lange (JCTC 2012, 8, 1999-2011)
+      integer :: p16 = 2
+   end type enum_born_kernel
+
+   !> Actual enumerator for the generalized Born kernels
+   type(enum_born_kernel), parameter :: born_kernel = enum_born_kernel()
 
    !> Implementation of GBOBC integrator
    type, public :: born_integrator

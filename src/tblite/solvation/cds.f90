@@ -19,7 +19,7 @@
 
 !> Cavity, dispersion and surface contribution to the solvation free energy
 module tblite_solvation_cds
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
    use mctc_io_constants, only : pi
    use mctc_io_convert, only : aatoau
@@ -27,7 +27,10 @@ module tblite_solvation_cds
    use tblite_blas, only : dot, gemv, symv
    use tblite_container_cache, only : container_cache
    use tblite_mesh_lebedev, only : grid_size, get_angular_grid, list_bisection
-   use tblite_partition, only : owns_index
+   use tblite_hessian_solvation_cm5, only : add_cm5_coupling_hessian
+   use tblite_hessian_solvation_surface, only : add_surface_hessian
+   use tblite_partition, only : owns_index, serial_work_partition, operator(==)
+   use tblite_response_type, only : kernel_type, response_type
    use tblite_scf_info, only : scf_info, atom_resolved, not_used
    use tblite_scf_potential, only : potential_type
    use tblite_solvation_cm5, only : get_cm5_charges
@@ -86,6 +89,12 @@ module tblite_solvation_cds
       procedure :: get_potential
       !> Get solvation gradient
       procedure :: get_gradient
+      !> Evaluate second derivative w.r.t. the charges
+      procedure :: get_response_kernel
+      !> Evaluate mixed second derivative w.r.t. the charges and positions
+      procedure :: get_response_derivative
+      !> Evaluate second derivative w.r.t. the positions at fixed charges
+      procedure :: get_hessian
    end type cds_solvation
 
    !> Provide constructor for CDS solvation
@@ -387,6 +396,194 @@ subroutine get_gradient(self, mol, cache, wfn, gradient, sigma)
       end if
    end if
 end subroutine get_gradient
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the diagonal kernel 2 h S of the hydrogen bonding correction
+   !* h Q**2 S to the atomic kernel. The energy is quadratic in the charges,
+   !* hence the derivative along a change of the state vanishes.
+   !***********************************
+   !> Instance of the solvation model
+   class(cds_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   integer :: iat
+   type(cds_cache), pointer :: ptr
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+   if (present(dwfn) .or. .not.allocated(self%hbond)) return
+
+   call view(cache, ptr)
+   do iat = 1, mol%nat
+      kernel%kat(iat, iat) = kernel%kat(iat, iat) + 2*ptr%hbond(iat)*ptr%surface(iat)
+   end do
+end subroutine get_response_kernel
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
+   !***********************************
+   !* Mixed second derivative of the hydrogen bonding correction w.r.t. the
+   !* charges and the atomic positions. The potential v = 2 h S Q acts on the
+   !* charges Q = q + c shifted by the CM5 corrections c(R), hence at fixed q
+   !*   dv/dR = 2 h Q dS/dR + 2 h S dc/dR.
+   !* With dwfn, the derivative of the kernel applied to the first-order
+   !* charges is evaluated instead, which carries no CM5 shift.
+   !***********************************
+   !> Instance of the solvation model
+   class(cds_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   type(cds_cache), pointer :: ptr
+   real(wp), allocatable :: xat(:)
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+   if (.not.allocated(self%hbond)) return
+
+   call view(cache, ptr)
+   if (present(dwfn)) then
+      xat = dwfn%qat(:, 1)
+   else
+      xat = wfn%qat(:, 1)
+      if (self%useCM5) xat(:) = xat + ptr%cm5
+   end if
+   call add_hbond_derivative(ptr, xat, response%coord, response%qat, response%vat, &
+      & response%hessian, self%useCM5 .and. .not.present(dwfn))
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* Add the Hessian of E = sum_A [gamma_A + h_A Q_A**2] S_A(R) at fixed
+   !* charges q, with Q = q + c(R) for the CM5 variant. The surface areas
+   !* enter with the weights gamma + h Q**2, the CM5 shift adds the terms
+   !* with the derivatives of c.
+   !***********************************
+   !> Instance of the solvation model
+   class(cds_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   integer :: nat, iat, ix
+   type(cds_cache), pointer :: ptr
+   real(wp), allocatable :: qeff(:), kmat(:, :), mom(:, :), vtmp(:, :), cmat(:, :, :)
+
+   call check_second_derivatives(self, error)
+   if (allocated(error)) return
+
+   call view(cache, ptr)
+   nat = mol%nat
+   if (.not.allocated(self%hbond)) then
+      call add_surface_hessian(self%sasa, mol, ptr%tension, hessian)
+      return
+   end if
+
+   qeff = wfn%qat(:, 1)
+   if (self%useCM5) qeff(:) = qeff + ptr%cm5
+   call add_surface_hessian(self%sasa, mol, ptr%tension + ptr%hbond*qeff**2, hessian)
+
+   if (self%useCM5) then
+      !>-- contract the derivative of the potential with the CM5 derivatives
+      allocate(kmat(nat, nat), vtmp(nat, 3*nat), cmat(3, nat, 3*nat), source=0.0_wp)
+      do iat = 1, nat
+         kmat(iat, iat) = 2*ptr%hbond(iat)*ptr%surface(iat)
+      end do
+      mom = transpose(reshape(ptr%dcm5dr, [3*nat, nat]))
+      call add_hbond_derivative(ptr, qeff, [(ix, ix = 1, 3*nat)], mom, vtmp, cmat, .true.)
+      call add_cm5_coupling_hessian(mol, 2*ptr%hbond*ptr%surface*qeff, ptr%dcm5dr, kmat, &
+         & reshape(cmat, [3*nat, 3*nat]), hessian)
+   end if
+end subroutine get_hessian
+
+
+subroutine add_hbond_derivative(ptr, xat, coord, mom, vat, hessian, shifted)
+   !***********************************
+   !* Derivative of the potential v = 2 h S x of the hydrogen bonding
+   !* correction w.r.t. the atomic positions at fixed x. For each perturbed
+   !* coordinate the derivative of v is added to vat, its contraction with
+   !* the moments mom to hessian. With shifted, the term 2 h S dc/dR of the
+   !* CM5 corrections is added as well.
+   !***********************************
+   !> Cached data of the surface model
+   type(cds_cache), intent(in) :: ptr
+   !> Charges the kernel acts on
+   real(wp), intent(in) :: xat(:)
+   !> Perturbed coordinates 3*(iat-1)+ic
+   integer, intent(in) :: coord(:)
+   !> Moments contracted with the derivative of the potential, nat x npert
+   real(wp), intent(in) :: mom(:, :)
+   !> Derivative of the potential w.r.t. each perturbed coordinate
+   real(wp), intent(inout) :: vat(:, :)
+   !> Contraction of the moments with the derivative of the potential
+   real(wp), intent(inout) :: hessian(:, :, :)
+   !> Include the derivative of the CM5 corrections
+   logical, intent(in) :: shifted
+
+   integer :: ip, kat, kc
+   real(wp), allocatable :: wsurf(:), wcm5(:)
+
+   wsurf = 2*ptr%hbond*xat
+   wcm5 = 2*ptr%hbond*ptr%surface
+   do ip = 1, size(coord)
+      kat = (coord(ip) - 1)/3 + 1
+      kc = coord(ip) - 3*(kat - 1)
+      vat(:, ip) = vat(:, ip) + wsurf*ptr%dsdr(kc, kat, :)
+      call gemv(ptr%dsdr, wsurf*mom(:, ip), hessian(:, :, ip), beta=1.0_wp)
+      if (shifted) then
+         vat(:, ip) = vat(:, ip) + wcm5*ptr%dcm5dr(kc, kat, :)
+         call gemv(ptr%dcm5dr, wcm5*mom(:, ip), hessian(:, :, ip), beta=1.0_wp)
+      end if
+   end do
+end subroutine add_hbond_derivative
+
+
+subroutine check_second_derivatives(self, error)
+   !***********************************
+   !* Analytic second derivatives need the complete surface areas of a
+   !* serial calculation.
+   !***********************************
+   !> Instance of the solvation model
+   class(cds_solvation), intent(in) :: self
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+
+   if (.not.(self%partition == serial_work_partition)) then
+      call fatal_error(error, "Analytic second derivatives with solvation require "// &
+         & "a serial calculation")
+   end if
+end subroutine check_second_derivatives
 
 
 !> Return dependency on density

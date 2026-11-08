@@ -19,13 +19,14 @@
 
 !> Isotropic third-order onsite correction
 module tblite_coulomb_thirdorder
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_container_cache, only : container_cache
    use tblite_coulomb_charge, only : effective_coulomb
    use tblite_coulomb_multipole, only : damped_multipole
    use tblite_coulomb_type, only : coulomb_type
    use tblite_partition, only : owns_pair
+   use tblite_response_type, only : kernel_type, response_type
    use tblite_scf_potential, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
    implicit none
@@ -56,6 +57,12 @@ module tblite_coulomb_thirdorder
       procedure :: get_potential_gradient
       !> Evaluate gradient contributions from the selfconsistent interaction
       procedure :: get_gradient
+      !> Evaluate second derivative w.r.t. the charges
+      procedure :: get_response_kernel
+      !> Evaluate mixed second derivative w.r.t. the charges and positions
+      procedure :: get_response_derivative
+      !> Evaluate second derivative w.r.t. the positions at fixed charges
+      procedure :: get_hessian
    end type onsite_thirdorder
 
    character(len=*), parameter :: label = "onsite third-order electrostatics"
@@ -245,5 +252,100 @@ pure function variable_info(self) result(info)
 
    info = scf_info(charge=merge(shell_resolved, atom_resolved, self%shell_resolved))
 end function variable_info
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the diagonal kernel 2*hub*q of the onsite third-order energy
+   !* E = 1/3 sum hub q**3 at the charges in wfn. With dwfn, its derivative
+   !* 2*hub*dq along the first-order charges is added instead.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(onsite_thirdorder), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   integer :: iat, izp, ii, ish
+   real(wp) :: hub
+
+   if (self%shell_resolved) then
+      do iat = 1, mol%nat
+         izp = mol%id(iat)
+         ii = self%ish_at(iat)
+         do ish = 1, self%nsh_at(iat)
+            hub = 2*self%hubbard_derivs(ish, izp)
+            if (present(dwfn)) then
+               hub = hub * dwfn%qsh(ii+ish, 1)
+            else
+               hub = hub * wfn%qsh(ii+ish, 1)
+            end if
+            kernel%ksh(ii+ish, ii+ish) = kernel%ksh(ii+ish, ii+ish) + hub
+         end do
+      end do
+   else
+      do iat = 1, mol%nat
+         hub = 2*self%hubbard_derivs(1, mol%id(iat))
+         if (present(dwfn)) then
+            hub = hub * dwfn%qat(iat, 1)
+         else
+            hub = hub * wfn%qat(iat, 1)
+         end if
+         kernel%kat(iat, iat) = kernel%kat(iat, iat) + hub
+      end do
+   end if
+end subroutine get_response_kernel
+
+
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
+   !***********************************
+   !* The onsite third-order energy does not depend on the positions at
+   !* fixed charges, there is no mixed derivative.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(onsite_thirdorder), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> First-order quantities of the perturbations
+   type(response_type), intent(inout) :: response
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+end subroutine get_response_derivative
+
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* The onsite third-order energy does not depend on the positions at
+   !* fixed charges, there is no Hessian contribution.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(onsite_thirdorder), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+end subroutine get_hessian
+
 
 end module tblite_coulomb_thirdorder

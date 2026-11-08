@@ -6,7 +6,7 @@ module test_halogen
    use mstore, only : get_structure
    use tblite_classical_halogen, only : halogen_correction, new_halogen_correction
    use tblite_container, only : container_cache
-   use tblite_hessian_halogen, only : get_halogen_hessian
+   use tblite_wavefunction_type, only : wavefunction_type
    implicit none
    private
 
@@ -153,6 +153,7 @@ subroutine test_br2och2_hessian(error)
    type(structure_type) :: mol
    type(halogen_correction) :: xb
    type(container_cache) :: cache
+   type(wavefunction_type) :: wfn
    integer :: iat, ic
    real(wp) :: sigma(3, 3)
    real(wp), allocatable :: energy(:), gr(:, :), gl(:, :)
@@ -166,7 +167,7 @@ subroutine test_br2och2_hessian(error)
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
 
    hessian(:, :) = 0.0_wp
-   call get_halogen_hessian(xb, mol, hessian, error)
+   call xb%get_hessian(mol, cache, wfn, hessian, error)
    if (allocated(error)) return
 
    do iat = 1, mol%nat

@@ -22,24 +22,19 @@
 module tblite_hessian_polarizability
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
-   use tblite_container, only : container_cache
    use tblite_context, only : context_type
-   use tblite_hessian_coulomb, only : get_potential_derivative
-   use tblite_hessian_dispersion, only : get_dispersion_potential_derivative
-   use tblite_hessian_solvation, only : get_solvation_kernel_derivative
-   use tblite_hessian_multipole, only : get_multipole_potential_derivative
    use tblite_hessian_reference, only : reference_data, new_reference_data, &
-      & get_nuclear_perturbation, add_atomic_potential_derivative, add_multipole_fock, &
-      & check_hessian_support
+      & get_nuclear_perturbation, add_potential_fock, check_hessian_support
    use tblite_response_cpscc, only : solve_cpscc, get_fock_response
    use tblite_response_density, only : density_response, density_response_derivative, &
       & has_integer_occupation
    use tblite_response_field, only : xtb_field_response
    use tblite_response_integral, only : get_multipole_derivative
-   use tblite_response_kernel, only : get_kernel_potential, &
-      & get_kernel_potential_derivative, has_dispersion_kernel
+   use tblite_response_kernel, only : interaction_cache, get_response_kernel, &
+      & get_response_derivative
    use tblite_response_nuclear, only : xtb_nuclear_response
    use tblite_response_polarizability, only : check_response_support
+   use tblite_response_type, only : kernel_type, response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
    use tblite_wavefunction_mulliken, only : get_mulliken_shell_charges, &
@@ -59,11 +54,8 @@ module tblite_hessian_polarizability
       type(potential_type) :: pot
       !> First-order charges and multipole moments
       type(wavefunction_type) :: wfn
-      !> Derivative of the first-order shell-resolved potential w.r.t. the
-      !> atomic positions at fixed first-order moments
-      real(wp), allocatable :: dvshdr(:, :)
-      !> Derivative of the first-order multipole potentials
-      real(wp), allocatable :: dvdp(:, :, :, :), dvqp(:, :, :, :)
+      !> Derivative of the response kernel along the first-order moments
+      type(kernel_type) :: kernel
    end type field_data
 
 contains
@@ -91,11 +83,11 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
    !> Derivative of the polarizability tensor
    real(wp), intent(out) :: dalpha(:, :, :, :)
 
-   integer :: nat, nao, nsh, iat, idir, ish
-   real(wp), allocatable :: dvat(:, :, :)
+   integer :: nat, nao, nsh, iat, idir
    type(reference_data) :: ref
+   type(interaction_cache) :: cache
+   type(kernel_type) :: kernel
    type(field_data) :: field(3)
-   type(container_cache) :: ccache, dcache
    type(error_type), allocatable :: error, local_error
 
    nat = mol%nat
@@ -109,51 +101,26 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
       call fatal_error(error, "Analytic polarizability derivative requires integer "// &
          & "occupation numbers")
    end if
-   if (.not.allocated(error)) call new_reference_data(ref, mol, calc, wfn, error)
+   if (.not.allocated(error)) then
+      call new_reference_data(ref, mol, calc, wfn, cache)
+      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
+   end if
    if (allocated(error)) then
       call ctx%set_error(error)
       return
    end if
 
-   call calc%coulomb%update(mol, ccache)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, dcache)
-
-   !>-- field response and the derivative of its potential at fixed moments
-   allocate(dvat(nat, 3, nat))
+   !>-- field response and the derivative of the kernel along it
    do idir = 1, 3
       associate(fld => field(idir))
-         allocate(fld%dp(nao, nao, 1), fld%dh(nao, nao, 1), fld%dvshdr(nsh, 3*nat))
-         allocate(fld%dvdp(3, nat, 3, nat), fld%dvqp(6, nat, 3, nat), source=0.0_wp)
+         allocate(fld%dp(nao, nao, 1), fld%dh(nao, nao, 1))
          call new_potential(fld%pot, mol, calc%bas, 1)
          call new_wavefunction(fld%wfn, nat, nsh, nao, 1, wfn%kt)
-         call xtb_field_response(mol, calc, wfn, ref%ints, ccache, dcache, idir, fld%dp, &
-            & fld%dh, fld%pot, fld%wfn, error, kat=ref%solv%kmat)
+         call xtb_field_response(mol, calc, wfn, ref%ints, kernel, idir, fld%dp, fld%dh, &
+            & fld%pot, fld%wfn, error)
          if (allocated(error)) exit
-
-         call get_potential_derivative(mol, calc, ccache, fld%wfn, fld%dvshdr)
-         if (allocated(calc%coulomb%aes2)) then
-            call get_multipole_potential_derivative(calc%coulomb%aes2, mol, &
-               & fld%wfn%qat(:, 1), fld%wfn%dpat(:, :, 1), fld%wfn%qpat(:, :, 1), dvat, &
-               & fld%dvdp, fld%dvqp)
-            call add_atomic_potential_derivative(calc, dvat, fld%dvshdr)
-         end if
-         if (has_dispersion_kernel(calc)) then
-            call get_dispersion_potential_derivative(calc%dispersion, mol, wfn%qat(:, 1), &
-               & dvat, error, dqat=fld%wfn%qat(:, 1))
-            if (allocated(error)) exit
-            call add_atomic_potential_derivative(calc, dvat, fld%dvshdr)
-         end if
-         if (allocated(calc%interactions)) then
-            call get_solvation_kernel_derivative(ref%solv, mol, fld%wfn%qat(:, 1), dvat)
-            call add_atomic_potential_derivative(calc, dvat, fld%dvshdr)
-         end if
-         !>-- the potential of a unit field on an atom is minus its position
-         do iat = 1, nat
-            do ish = 1, calc%bas%nsh_at(iat)
-               fld%dvshdr(calc%bas%ish_at(iat)+ish, 3*(iat-1)+idir) = &
-                  & fld%dvshdr(calc%bas%ish_at(iat)+ish, 3*(iat-1)+idir) - 1.0_wp
-            end do
-         end do
+         call get_response_kernel(mol, calc, cache, wfn, fld%kernel, error, dwfn=fld%wfn)
+         if (allocated(error)) exit
       end associate
    end do
    if (allocated(error)) then
@@ -162,11 +129,11 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
    end if
 
    !$omp parallel do schedule(dynamic) default(none) &
-   !$omp shared(mol, calc, wfn, ref, field, nat, dalpha, error) &
+   !$omp shared(mol, calc, wfn, ref, cache, kernel, field, nat, dalpha, error) &
    !$omp private(iat, local_error)
    do iat = 1, nat
-      call get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha(:, :, :, iat), &
-         & local_error)
+      call get_mixed_response(mol, calc, wfn, ref, cache, kernel, field, iat, &
+         & dalpha(:, :, :, iat), local_error)
       if (allocated(local_error)) then
          !$omp critical (tblite_hessian_polarizability_error)
          if (.not.allocated(error)) call move_alloc(local_error, error)
@@ -177,7 +144,7 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
 
 end subroutine xtb_polarizability_gradient
 
-subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
+subroutine get_mixed_response(mol, calc, wfn, ref, cache, kernel, field, iat, dalpha, error)
    !***********************************
    !* Derivative of the polarizability w.r.t. the three displacements of one
    !* atom. For the displacement c and the field b the right-hand side of the
@@ -198,6 +165,10 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
    type(wavefunction_type), intent(in) :: wfn
    !> Quantities of the unperturbed system
    type(reference_data), intent(in) :: ref
+   !> Caches of the interaction containers
+   type(interaction_cache), intent(inout) :: cache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
    !> Field response for the three directions
    type(field_data), intent(in) :: field(3)
    !> Displaced atom
@@ -213,10 +184,10 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
    real(wp), allocatable :: dqpat(:, :, :), dp(:, :, :), dw(:, :), fock_r(:, :)
    real(wp), allocatable :: dfock(:, :, :, :), ddpat_x(:, :, :, :), dqpat_x(:, :, :, :)
    real(wp), allocatable :: fock(:, :, :), rhs(:, :, :), tmp(:, :), dpx(:, :, :)
-   real(wp), allocatable :: dvao(:), n0sh(:), qsh(:, :), qat(:, :), dpat(:, :, :)
-   type(container_cache) :: ccache, dcache
+   real(wp), allocatable :: n0sh(:), qsh(:, :), qat(:, :), dpat(:, :, :)
    type(potential_type) :: pot_r, pot_x
    type(wavefunction_type) :: wfn_r, wfn_m, wfn_x
+   type(response_type) :: dfield(3)
 
    nat = mol%nat
    nao = calc%bas%nao
@@ -224,9 +195,6 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
    multipoles = allocated(calc%coulomb%aes2)
    dalpha(:, :, :) = 0.0_wp
 
-   !>-- the caches serve as scratch space of the containers
-   call calc%coulomb%update(mol, ccache)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, dcache)
    call new_potential(pot_r, mol, calc%bas, 1)
    call new_potential(pot_x, mol, calc%bas, 1)
    call new_wavefunction(wfn_r, nat, nsh, nao, 1, wfn%kt)
@@ -235,19 +203,27 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
    allocate(ds(nao, nao, 3), fock0(nao, nao, 3), dqsh(nsh, 3), ddpat(3, nat, 3), &
       & dqpat(6, nat, 3), dp(nao, nao, 1), dw(nao, nao), fock_r(nao, nao), &
       & ddpat_x(3, nat, 3, 3), dqpat_x(6, nat, 3, 3), fock(nao, nao, 1), rhs(nao, nao, 1), &
-      & tmp(nao, nao), dpx(nao, nao, 1), dvao(nao), qsh(nsh, 1), qat(nat, 1), &
-      & dpat(3, nat, 1))
+      & tmp(nao, nao), dpx(nao, nao, 1), qsh(nsh, 1), qat(nat, 1), dpat(3, nat, 1))
    allocate(dfock(nao, nao, 3, 3), n0sh(nsh), source=0.0_wp)
 
-   call get_nuclear_perturbation(mol, calc, wfn, ref, iat, .true., ds, fock0, dqsh, &
-      & ddpat, dqpat)
+   call get_nuclear_perturbation(mol, calc, wfn, ref, cache, iat, .true., ds, fock0, dqsh, &
+      & ddpat, dqpat, error)
+   if (allocated(error)) return
 
-   !>-- derivative of the multipole integrals with the field response
    do idir = 1, 3
+      !>-- derivative of the multipole integrals with the field response
       call get_multipole_derivative(mol, calc%bas, ref%lattr, ref%cutoff, iat, &
          & field(idir)%dp(:, :, 1), field(idir)%pot%vdp(:, :, 1), &
          & field(idir)%pot%vqp(:, :, 1), dfock(:, :, :, idir), ddpat_x(:, :, :, idir), &
          & dqpat_x(:, :, :, idir))
+
+      !>-- derivative of the first-order field potential at fixed first-order
+      !>   moments, the potential of a unit field on an atom is minus its position
+      call new_response(dfield(idir), mol, calc%bas, [3*iat-2, 3*iat-1, 3*iat])
+      call get_response_derivative(mol, calc, cache, wfn, dfield(idir), error, &
+         & dwfn=field(idir)%wfn)
+      if (allocated(error)) return
+      dfield(idir)%vat(iat, idir) = dfield(idir)%vat(iat, idir) - 1.0_wp
    end do
 
    do ic = 1, 3
@@ -257,8 +233,8 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
          wfn_m%dpat(:, :, 1) = ddpat(:, :, ic)
          wfn_m%qpat(:, :, 1) = dqpat(:, :, ic)
       end if
-      call xtb_nuclear_response(mol, calc, wfn, ref%ints, ccache, dcache, ds(:, :, ic), &
-         & fock0(:, :, ic), wfn_m, dp, dw, pot_r, wfn_r, error, fock_r, kat=ref%solv%kmat)
+      call xtb_nuclear_response(mol, calc, wfn, ref%ints, kernel, ds(:, :, ic), &
+         & fock0(:, :, ic), wfn_m, dp, dw, pot_r, wfn_r, error, fock_r)
       if (allocated(error)) return
 
       do idir = 1, 3
@@ -272,36 +248,24 @@ subroutine get_mixed_response(mol, calc, wfn, ref, field, iat, dalpha, error)
             end if
 
             call pot_x%reset
-            call get_kernel_potential(mol, calc, ccache, dcache, wfn, wfn_x, pot_x, error, &
-               & kat=ref%solv%kmat)
-            if (allocated(error)) return
-            call get_kernel_potential_derivative(mol, calc, dcache, wfn, fld%wfn, wfn_r, &
-               & pot_x, error)
-            if (allocated(error)) return
+            call kernel%get_potential(wfn_x, pot_x)
+            call fld%kernel%get_potential(wfn_r, pot_x)
             call get_fock_response(calc, ref%ints, pot_x, fock)
 
             !>-- derivative of the field Hamiltonian at fixed first-order moments
             do iao = 1, nao
-               dvao(iao) = fld%dvshdr(calc%bas%ao2sh(iao), 3*(iat-1)+ic)
-            end do
-            do iao = 1, nao
                do jao = 1, nao
                   fock(jao, iao, 1) = fock(jao, iao, 1) + dfock(jao, iao, ic, idir) &
-                     & - 0.5_wp*(fld%pot%vao(jao, 1) + fld%pot%vao(iao, 1))*ds(jao, iao, ic) &
-                     & - 0.5_wp*(dvao(jao) + dvao(iao))*ref%ints%overlap(jao, iao)
+                     & - 0.5_wp*(fld%pot%vao(jao, 1) + fld%pot%vao(iao, 1))*ds(jao, iao, ic)
                end do
             end do
-            if (multipoles) then
-               call add_multipole_fock(calc, ref%ints, fld%dvdp(:, :, ic, iat), &
-                  & fld%dvqp(:, :, ic, iat), fock(:, :, 1))
-            end if
+            call add_potential_fock(mol, calc, ref%ints, dfield(idir), ic, fock(:, :, 1))
 
             call density_response(wfn, fock(:, :, 1), rhs(:, :, 1))
             call density_response_derivative(wfn, fld%dh(:, :, 1), fock_r, ds(:, :, ic), tmp)
             rhs(:, :, 1) = rhs(:, :, 1) + tmp
 
-            call solve_cpscc(mol, calc, wfn, ref%ints, ccache, dcache, rhs, dpx, error, &
-               & kat=ref%solv%kmat)
+            call solve_cpscc(mol, calc, wfn, ref%ints, kernel, rhs, dpx, error)
             if (allocated(error)) return
 
             !>-- mu = sum_A (R_A q_A + d_A), the position enters explicitly

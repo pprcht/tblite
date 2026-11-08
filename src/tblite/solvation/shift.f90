@@ -81,6 +81,8 @@ module tblite_solvation_shift
       procedure :: update
       !> Get shift energy
       procedure :: get_engrad
+      !> Evaluate second derivative w.r.t. the positions
+      procedure :: get_hessian
    end type shift_solvation
 
    !> Provide constructor for shift
@@ -212,6 +214,25 @@ subroutine get_engrad(self, mol, cache, energies, gradient, sigma)
 
    energies(:) = energies + ptr%total_shift/real(mol%nat)
 end subroutine get_engrad
+
+subroutine get_hessian(self, mol, cache, wfn, hessian, error)
+   !***********************************
+   !* The free energy shift does not depend on the atomic positions.
+   !***********************************
+   !> Instance of the solvation model
+   class(shift_solvation), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Cached data between different runs
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Molecular Hessian, dimension 3*nat by 3*nat
+   real(wp), contiguous, intent(inout) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+end subroutine get_hessian
+
 
 !> Calculate the solvation state shift
 function get_stateshift(state, temperature, density, molecularMass) &

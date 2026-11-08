@@ -19,12 +19,13 @@
 
 !> General isotropic second-order electrostatics model
 module tblite_coulomb_charge_type
-   use mctc_env, only : wp
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
    use tblite_blas, only : dot, gemv, symv
    use tblite_container_cache, only : container_cache
    use tblite_coulomb_cache, only : coulomb_cache
    use tblite_coulomb_type, only : coulomb_type
+   use tblite_response_type, only : kernel_type
    use tblite_scf_potential, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
    implicit none
@@ -52,6 +53,8 @@ module tblite_coulomb_charge_type
       procedure :: get_potential_gradient
       !> Evaluate gradient contributions from the selfconsistent interaction
       procedure :: get_gradient
+      !> Evaluate second derivative w.r.t. the charges
+      procedure :: get_response_kernel
       !> Evaluate Coulomb matrix
       procedure(get_coulomb_matrix), deferred :: get_coulomb_matrix
       !> Evaluate uncontracted derivatives of Coulomb matrix
@@ -304,6 +307,40 @@ pure function variable_info(self) result(info)
 
    info = scf_info(charge=merge(shell_resolved, atom_resolved, self%shell_resolved))
 end function variable_info
+
+
+subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
+   !***********************************
+   !* Add the Coulomb matrix to the shell- or atom-resolved charge kernel.
+   !* The energy is quadratic in the charges, the kernel does not change
+   !* along a first-order state dwfn.
+   !***********************************
+   !> Instance of the electrostatic container
+   class(coulomb_charge_type), intent(in) :: self
+   !> Molecular structure data
+   type(structure_type), intent(in) :: mol
+   !> Reusable data container
+   type(container_cache), intent(inout) :: cache
+   !> Wavefunction data
+   type(wavefunction_type), intent(in) :: wfn
+   !> Response kernel
+   type(kernel_type), intent(inout) :: kernel
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
+
+   type(coulomb_cache), pointer :: ptr
+
+   if (present(dwfn)) return
+   call view(cache, ptr)
+
+   if (self%shell_resolved) then
+      kernel%ksh(:, :) = kernel%ksh + ptr%amat
+   else
+      kernel%kat(:, :) = kernel%kat + ptr%amat
+   end if
+end subroutine get_response_kernel
 
 
 !> Inspect container cache and reallocate it in case of type mismatch

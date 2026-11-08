@@ -23,13 +23,14 @@ module tblite_response_polarizability
    use mctc_io, only : structure_type
    use tblite_adjlist, only : adjacency_list, new_adjacency_list
    use tblite_basis_type, only : get_cutoff
-   use tblite_container, only : container_cache
    use tblite_context, only : context_type
    use tblite_cutoff, only : get_lattice_points
-   use tblite_hessian_solvation, only : solvation_kernel, new_solvation_kernel
    use tblite_integral_type, only : integral_type, new_integral
    use tblite_partition, only : serial_work_partition, operator(==)
    use tblite_response_field, only : xtb_field_response
+   use tblite_response_kernel, only : interaction_cache, new_interaction_cache, &
+      & get_response_kernel
+   use tblite_response_type, only : kernel_type
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_mulliken, only : get_mulliken_atomic_multipoles
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
@@ -65,19 +66,19 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
    real(wp), allocatable :: cn(:), lattr(:, :), selfenergy(:)
    real(wp), allocatable :: dh(:, :, :), dp(:, :, :), ddpat(:, :, :)
    type(integral_type) :: ints
-   type(container_cache) :: ccache, dcache
+   type(interaction_cache) :: cache
+   type(kernel_type) :: kernel
    type(adjacency_list) :: list
    type(potential_type) :: pot
    type(wavefunction_type) :: wfn_r
-   type(solvation_kernel) :: solv
    type(error_type), allocatable :: error
 
    alpha(:, :) = 0.0_wp
 
    call check_response_support(mol, calc, wfn, error)
-   !>-- implicit solvation enters the field response only via its charge kernel
-   if (.not.allocated(error) .and. allocated(calc%interactions)) then
-      call new_solvation_kernel(solv, mol, calc, error)
+   if (.not.allocated(error)) then
+      call new_interaction_cache(cache, mol, calc)
+      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
    end if
    if (allocated(error)) then
       call ctx%set_error(error)
@@ -99,17 +100,13 @@ subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
    call get_hamiltonian(mol, lattr, list, calc%bas, calc%h0, selfenergy, &
       & ints%overlap, ints%dipole, ints%quadrupole, ints%hamiltonian)
 
-   call calc%coulomb%update(mol, ccache)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, dcache)
-
    call new_potential(pot, mol, calc%bas, wfn%nspin)
    call new_wavefunction(wfn_r, mol%nat, calc%bas%nsh, calc%bas%nao, wfn%nspin, wfn%kt)
    allocate(dh(calc%bas%nao, calc%bas%nao, 1), dp(calc%bas%nao, calc%bas%nao, 1), &
       & ddpat(3, mol%nat, 1))
 
    do idir = 1, 3
-      call xtb_field_response(mol, calc, wfn, ints, ccache, dcache, idir, dp, dh, pot, &
-         & wfn_r, error, kat=solv%kmat)
+      call xtb_field_response(mol, calc, wfn, ints, kernel, idir, dp, dh, pot, wfn_r, error)
       if (allocated(error)) then
          call ctx%set_error(error)
          return
@@ -126,7 +123,8 @@ subroutine check_response_support(mol, calc, wfn, error)
    !***********************************
    !* Reject calculations outside the validity of the analytic response:
    !* open-shell, non-self-consistent, periodic and distributed. Interaction
-   !* containers are checked when collecting the implicit solvation models.
+   !* containers without analytic second derivatives report an error when
+   !* setting up the response kernel.
    !***********************************
    !> Molecular structure data
    type(structure_type), intent(in) :: mol

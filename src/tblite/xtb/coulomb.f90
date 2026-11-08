@@ -232,7 +232,7 @@ subroutine get_response_kernel(self, mol, cache, wfn, kernel, error, dwfn)
 end subroutine get_response_kernel
 
 
-subroutine get_response_derivative(self, mol, cache, wfn, response, error)
+subroutine get_response_derivative(self, mol, cache, wfn, response, error, dwfn)
    !***********************************
    !* Add the mixed second derivatives of all electrostatic contributions.
    !***********************************
@@ -248,19 +248,21 @@ subroutine get_response_derivative(self, mol, cache, wfn, response, error)
    type(response_type), intent(inout) :: response
    !> Error handling
    type(error_type), allocatable, intent(out) :: error
+   !> First-order change of the state
+   type(wavefunction_type), intent(in), optional :: dwfn
 
    if (allocated(self%es2)) then
-      call self%es2%get_response_derivative(mol, cache, wfn, response, error)
+      call self%es2%get_response_derivative(mol, cache, wfn, response, error, dwfn)
       if (allocated(error)) return
    end if
 
    if (allocated(self%aes2)) then
-      call self%aes2%get_response_derivative(mol, cache, wfn, response, error)
+      call self%aes2%get_response_derivative(mol, cache, wfn, response, error, dwfn)
       if (allocated(error)) return
    end if
 
    if (allocated(self%es3)) then
-      call self%es3%get_response_derivative(mol, cache, wfn, response, error)
+      call self%es3%get_response_derivative(mol, cache, wfn, response, error, dwfn)
    end if
 end subroutine get_response_derivative
 
