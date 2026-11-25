@@ -25,10 +25,10 @@ module tblite_xtb_response
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
    use tblite_adjlist, only : adjacency_list
-   use tblite_hessian_polarizability, only : xtb_polarizability_gradient
+   use tblite_hessian_polarizability, only : get_field_kernels
    use tblite_hessian_reference, only : reference_data, new_reference_data, &
       & check_hessian_support
-   use tblite_hessian_xtb, only : xtb_hessian
+   use tblite_hessian_xtb, only : xtb_nuclear_derivatives
    use tblite_integral_type, only : integral_type
    use tblite_response_density, only : has_integer_occupation
    use tblite_response_kernel, only : interaction_cache, get_response_kernel
@@ -75,7 +75,8 @@ subroutine xtb_response(mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, d
    !***********************************
    !* Evaluate the requested response properties of a converged single
    !* point calculation. One response kernel serves all properties, the
-   !* field responses of the polarizability enter its derivative.
+   !* field responses of the polarizability enter its derivative, which
+   !* shares the nuclear responses with the Hessian.
    !* Input:  integrals, lattice points, neighbor list, cutoff, self-energies,
    !*         CN derivative, converged potential and caches of the single point
    !* Output: hessian(3*nat, 3*nat) and dipgrad(3, 3, nat), alpha(3, 3) and
@@ -148,20 +149,18 @@ subroutine xtb_response(mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, d
       if (present(alpha)) alpha(:, :) = alpha_field
    end if
 
-   if (present(hessian) .or. present(dalpha)) then
-      call new_reference_data(ref, mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, &
-         & dsedcn, dcndr, pot)
-   end if
-
    if (present(dalpha)) then
-      call xtb_polarizability_gradient(mol, calc, wfn, ref, cache, kernel, field, dalpha, &
-         & error)
+      call get_field_kernels(mol, calc, cache, wfn, field, error)
       if (allocated(error)) return
    end if
 
-   if (present(hessian)) then
-      call xtb_hessian(mol, calc, wfn, ref, cache, kernel, wdensity, hessian, error, &
-         & dipgrad)
+   !>-- the Hessian and the derivatives of the dipole moment and of the
+   !>   polarizability share the nuclear responses
+   if (present(hessian) .or. present(dalpha)) then
+      call new_reference_data(ref, mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, &
+         & dsedcn, dcndr, pot)
+      call xtb_nuclear_derivatives(mol, calc, wfn, ref, cache, kernel, field, error, &
+         & hessian=hessian, wdensity=wdensity, dipgrad=dipgrad, dalpha=dalpha)
       if (allocated(error)) return
    end if
 end subroutine xtb_response
