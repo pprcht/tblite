@@ -23,8 +23,8 @@ module test_response
    use tblite_container, only : container_type, container_cache
    use tblite_context_type, only : context_type
    use tblite_external_field, only : electric_field
-   use tblite_response_polarizability, only : xtb_polarizability
    use tblite_response_type, only : kernel_type, new_kernel, response_type, new_response
+   use tblite_results, only : results_type
    use tblite_scf_potential, only : potential_type, new_potential
    use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
       & solvent_data, get_solvent_data, new_solvation, new_solvation_cds, &
@@ -86,6 +86,7 @@ subroutine test_polarizability_gen(error, mol, method, etemp, alpb)
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn, wfn0
    class(container_type), allocatable :: cont
+   type(results_type) :: res
    real(wp), parameter :: step = 2.0e-4_wp, thr = 1.0e-5_wp
    real(wp), parameter :: disp(4) = [-2.0_wp, -1.0_wp, 1.0_wp, 2.0_wp]
    real(wp), parameter :: weight(4) = [1.0_wp, -8.0_wp, 8.0_wp, -1.0_wp] / 12.0_wp
@@ -100,12 +101,14 @@ subroutine test_polarizability_gen(error, mol, method, etemp, alpb)
    end if
    call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, etemp)
 
-   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
-   call xtb_polarizability(ctx, mol, calc, wfn0, alpha)
+   calc%polarizability = .true.
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0, results=res)
    if (ctx%failed()) then
       call ctx%get_error(error)
       return
    end if
+   alpha(:, :) = res%polarizability
+   calc%polarizability = .false.
 
    !>-- five-point stencil, the leading error of the central difference is
    !>   the second hyperpolarizability and too large for a tight threshold
@@ -267,7 +270,8 @@ subroutine test_unsupported(error)
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
    class(container_type), allocatable :: cont
-   real(wp) :: energy, alpha(3, 3)
+   type(results_type) :: res
+   real(wp) :: energy
 
    call get_structure(mol, "MB16-43", "01")
    call new_gfn2_calculator(calc, mol, error)
@@ -276,8 +280,8 @@ subroutine test_unsupported(error)
 
    cont = electric_field([0.0_wp, 0.0_wp, 1.0e-3_wp])
    call calc%push_back(cont)
-   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
-   call xtb_polarizability(ctx, mol, calc, wfn, alpha)
+   calc%polarizability = .true.
+   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0, results=res)
    if (ctx%failed()) call ctx%get_error(error)
 
 end subroutine test_unsupported

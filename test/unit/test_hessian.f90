@@ -22,15 +22,13 @@ module test_hessian
    use mstore, only : get_structure
    use tblite_container, only : container_cache
    use tblite_context_type, only : context_type
-   use tblite_hessian_polarizability, only : xtb_polarizability_gradient
-   use tblite_hessian_xtb, only : xtb_hessian
    use tblite_partition, only : work_partition, new_work_partition
    use tblite_solvation, only : solvation_input, alpb_input, cds_input, shift_input, &
       & ddx_input, born_kernel, solvent_data, get_solvent_data, new_solvation, &
       & new_solvation_cds, new_solvation_shift, solvation_type
    use tblite_container, only : container_type, container_list
-   use tblite_response_polarizability, only : xtb_polarizability
    use tblite_response_type, only : kernel_type, new_kernel, response_type, new_response
+   use tblite_results, only : results_type
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
@@ -529,10 +527,8 @@ subroutine test_hessian_gen(error, mol, calc, etemp)
    real(wp), parameter :: thr_scf = 1.0e-6_wp
 
    call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, etemp)
-   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
-
    allocate(hessian(3*mol%nat, 3*mol%nat), numhess(3*mol%nat, 3*mol%nat))
-   call xtb_hessian(ctx, mol, calc, wfn0, hessian)
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0, hessian=hessian)
    if (ctx%failed()) then
       call ctx%get_error(error)
       return
@@ -649,18 +645,19 @@ subroutine test_dipgrad_gen(error, mol, calc)
    type(structure_type) :: displ
    type(wavefunction_type) :: wfn0, wfn
    real(wp) :: energy, dipr(3), dipl(3)
+   type(results_type) :: res
    real(wp), allocatable :: hessian(:, :), dipgrad(:, :, :), numdip(:, :, :)
    real(wp), parameter :: step = 1.0e-4_wp, thr_scf = 1.0e-5_wp
 
    call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
-   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
-
-   allocate(hessian(3*mol%nat, 3*mol%nat), dipgrad(3, 3, mol%nat), numdip(3, 3, mol%nat))
-   call xtb_hessian(ctx, mol, calc, wfn0, hessian, dipgrad)
+   allocate(hessian(3*mol%nat, 3*mol%nat), numdip(3, 3, mol%nat))
+   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0, results=res, &
+      & hessian=hessian)
    if (ctx%failed()) then
       call ctx%get_error(error)
       return
    end if
+   dipgrad = res%dipole_gradient
 
    displ = mol
    do iat = 1, mol%nat
@@ -732,35 +729,48 @@ subroutine test_polgrad_gen(error, mol, calc)
    type(context_type) :: ctx
    type(structure_type) :: displ
    type(wavefunction_type) :: wfn0, wfn
-   real(wp) :: energy, alphar(3, 3), alphal(3, 3)
-   real(wp), allocatable :: dalpha(:, :, :, :), numalpha(:, :, :, :)
+   type(xtb_calculator) :: calc_grad, calc_alpha
+   type(results_type) :: res
+   real(wp) :: energy
+   real(wp), allocatable :: dalpha(:, :, :, :), numalpha(:, :, :, :), alphar(:, :)
    real(wp), parameter :: step = 1.0e-3_wp, thr_scf = 2.0e-4_wp
 
-   call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
-   call xtb_singlepoint(ctx, mol, calc, wfn0, acc, energy, verbosity=0)
+   calc_grad = calc
+   calc_grad%polarizability_gradient = .true.
+   calc_alpha = calc
+   calc_alpha%polarizability = .true.
 
-   allocate(dalpha(3, 3, 3, mol%nat), numalpha(3, 3, 3, mol%nat))
-   call xtb_polarizability_gradient(ctx, mol, calc, wfn0, dalpha)
+   call new_wavefunction(wfn0, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
+   call xtb_singlepoint(ctx, mol, calc_grad, wfn0, acc, energy, verbosity=0, results=res)
    if (ctx%failed()) then
       call ctx%get_error(error)
       return
    end if
+   dalpha = res%polarizability_gradient
 
+   allocate(numalpha(3, 3, 3, mol%nat))
    displ = mol
-   do iat = 1, mol%nat
+   displacements: do iat = 1, mol%nat
       do ic = 1, 3
          wfn = wfn0
          displ%xyz(ic, iat) = mol%xyz(ic, iat) + step
-         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
-         call xtb_polarizability(ctx, displ, calc, wfn, alphar)
+         call xtb_singlepoint(ctx, displ, calc_alpha, wfn, acc, energy, verbosity=0, &
+            & results=res)
+         if (ctx%failed()) exit displacements
+         alphar = res%polarizability
          wfn = wfn0
          displ%xyz(ic, iat) = mol%xyz(ic, iat) - step
-         call xtb_singlepoint(ctx, displ, calc, wfn, acc, energy, verbosity=0)
-         call xtb_polarizability(ctx, displ, calc, wfn, alphal)
+         call xtb_singlepoint(ctx, displ, calc_alpha, wfn, acc, energy, verbosity=0, &
+            & results=res)
+         if (ctx%failed()) exit displacements
          displ%xyz(ic, iat) = mol%xyz(ic, iat)
-         numalpha(:, :, ic, iat) = (alphar - alphal) / (2*step)
+         numalpha(:, :, ic, iat) = (alphar - res%polarizability) / (2*step)
       end do
-   end do
+   end do displacements
+   if (ctx%failed()) then
+      call ctx%get_error(error)
+      return
+   end if
 
    if (any(abs(dalpha - numalpha) > thr_scf)) then
       call test_failed(error, "Polarizability derivative does not match finite differences")
@@ -809,17 +819,15 @@ subroutine test_unsupported_smearing(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
+   type(results_type) :: res
    real(wp) :: energy
-   real(wp), allocatable :: dalpha(:, :, :, :)
 
    call get_structure(mol, "Heavy28", "teh2_hcl")
    call new_gfn1_calculator(calc, mol, error)
    if (allocated(error)) return
+   calc%polarizability_gradient = .true.
    call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, 0.02_wp)
-   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
-
-   allocate(dalpha(3, 3, 3, mol%nat))
-   call xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
+   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0, results=res)
    if (ctx%failed()) call ctx%get_error(error)
 
 end subroutine test_unsupported_smearing
@@ -833,6 +841,7 @@ subroutine test_unsupported_spin(error)
    type(structure_type) :: mol
    type(xtb_calculator) :: calc
    type(wavefunction_type) :: wfn
+   real(wp) :: energy
    real(wp), allocatable :: hessian(:, :)
 
    call get_structure(mol, "MB16-43", "01")
@@ -841,7 +850,7 @@ subroutine test_unsupported_spin(error)
    call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 2, kt)
 
    allocate(hessian(3*mol%nat, 3*mol%nat))
-   call xtb_hessian(ctx, mol, calc, wfn, hessian)
+   call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0, hessian=hessian)
    if (ctx%failed()) call ctx%get_error(error)
 
 end subroutine test_unsupported_spin
@@ -1266,8 +1275,8 @@ contains
       real(wp) :: energy
 
       call new_wavefunction(wfn, mol%nat, calc%bas%nsh, calc%bas%nao, 1, kt)
-      call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0)
-      if (.not.ctx%failed()) call xtb_hessian(ctx, mol, calc, wfn, hessian)
+      call xtb_singlepoint(ctx, mol, calc, wfn, acc, energy, verbosity=0, &
+         & hessian=hessian)
       if (ctx%failed()) call ctx%get_error(error)
    end subroutine get_analytic_hessian
 

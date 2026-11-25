@@ -30,8 +30,6 @@ module tblite_driver_run
    use tblite_data_spin, only : get_spin_constant
    use tblite_external_field, only : electric_field
    use tblite_features, only : tblite_has_mpi
-   use tblite_hessian_polarizability, only : xtb_polarizability_gradient
-   use tblite_hessian_xtb, only : xtb_hessian
    use tblite_io_molden, only : save_molden
    use tblite_io_trexio, only : save_trexio
    use tblite_lapack_solver, only : lapack_solver
@@ -39,7 +37,6 @@ module tblite_driver_run
       & ascii_quadrupole_moments, ascii_polarizability, tagged_result, json_results
    use tblite_param, only : param_record
    use tblite_post_processing_list, only : add_post_processing, post_processing_list
-   use tblite_response_polarizability, only : xtb_polarizability
    use tblite_results, only : results_type
    use tblite_scf_mixer_input, only : anneal_input
    use tblite_solvation, only : new_solvation, new_solvation_cds, new_solvation_shift, solvation_type
@@ -66,8 +63,6 @@ module tblite_driver_run
    real(wp), parameter :: jtoau = 1.0_wp / (codata%me*codata%c**2*codata%alpha**2)
    !> Convert V/Å = J/(C·Å) to atomic units
    real(wp), parameter :: vatoau = jtoau / (ctoau * aatoau)
-   !> Accuracy of the wavefunction required for response properties
-   real(wp), parameter :: response_accuracy = 1.0e-3_wp
    character(len=:), allocatable :: wbo_label, molmom_label
 
 contains
@@ -81,10 +76,10 @@ subroutine run_main(config, error)
    character(len=:), allocatable :: method, filename
    integer :: unpaired, charge, unit, nspin, etemp_hold, etemp_steps, verbosity, idot
    logical :: restart_exist, use_guess
-   real(wp) :: energy, accuracy
+   real(wp) :: energy
    real(wp), allocatable :: dpmom(:), qpmom(:)
    real(wp), allocatable :: gradient(:, :), sigma(:, :)
-   real(wp), allocatable :: hessian(:, :), dipgrad(:, :, :), alpha(:, :), dalpha(:, :, :, :)
+   real(wp), allocatable :: hessian(:, :)
    type(param_record) :: param
    type(context_type) :: ctx
    type(xtb_calculator) :: calc
@@ -316,19 +311,13 @@ subroutine run_main(config, error)
       call ctx%message("")
    end if
 
-   !>-- the analytic response is not variational in the density and requires
-   !>   a tightly converged wavefunction
-   accuracy = config%accuracy
-   if ((config%hess .or. config%polar) .and. accuracy > response_accuracy) then
-      accuracy = response_accuracy
-      if (verbosity > 0) then
-         call info(ctx, "Tightening accuracy for the calculation of response properties")
-      end if
-   end if
+   calc%polarizability = config%polar
+   calc%polarizability_gradient = config%polgrad
+   if (config%hess) allocate(hessian(3*mol%nat, 3*mol%nat))
 
    call calc%set_partition(ctx%partition)
-   call xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigma, &
-      & verbosity, results, post_proc)
+   call xtb_singlepoint(ctx, mol, calc, wfn, config%accuracy, energy, gradient, sigma, &
+      & verbosity, results, post_proc, hessian)
    if (ctx%failed()) then
       call fatal(ctx, "Singlepoint calculation failed")
       do while(ctx%failed())
@@ -363,35 +352,16 @@ subroutine run_main(config, error)
 
    deallocate(post_proc)
 
-   if (config%polar) then
-      allocate(alpha(3, 3))
-      call xtb_polarizability(ctx, mol, calc, wfn, alpha)
-      if (.not.ctx%failed() .and. verbosity > 0) then
-         call ascii_polarizability(ctx%unit, verbosity, alpha)
-      end if
-   end if
-   if (config%polgrad .and. .not.ctx%failed()) then
-      allocate(dalpha(3, 3, 3, mol%nat))
-      call xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
-   end if
-   if (config%hess .and. .not.ctx%failed()) then
-      allocate(hessian(3*mol%nat, 3*mol%nat), dipgrad(3, 3, mol%nat))
-      call xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
-   end if
-   if (ctx%failed()) then
-      call fatal(ctx, "Calculation of response properties failed")
-      do while(ctx%failed())
-         call ctx%get_error(error)
-         write(error_unit, '("->", 1x, a)') error%message
-      end do
-      error stop
+   if (allocated(results%polarizability) .and. verbosity > 0) then
+      call ascii_polarizability(ctx%unit, verbosity, results%polarizability)
    end if
 
    if (allocated(config%grad_output)) then
       open(file=config%grad_output, newunit=unit)
       call tagged_result(unit, energy, gradient, sigma, energies=results%energies, &
-         & hessian=hessian, dipole_gradient=dipgrad, polarizability=alpha, &
-         & polarizability_gradient=dalpha)
+         & hessian=hessian, dipole_gradient=results%dipole_gradient, &
+         & polarizability=results%polarizability, &
+         & polarizability_gradient=results%polarizability_gradient)
       close(unit)
       if (verbosity > 0) then
          call info(ctx, "Tight-binding results written to '"//config%grad_output//"'")
@@ -401,8 +371,9 @@ subroutine run_main(config, error)
    if (config%json) then
       open(file=config%json_output, newunit=unit)
       call json_results(unit, "  ", energy=energy, gradient=gradient, sigma=sigma, &
-         & energies=results%energies, hessian=hessian, dipole_gradient=dipgrad, &
-         & polarizability=alpha, polarizability_gradient=dalpha)
+         & energies=results%energies, hessian=hessian, &
+         & dipole_gradient=results%dipole_gradient, polarizability=results%polarizability, &
+         & polarizability_gradient=results%polarizability_gradient)
       close(unit)
       if (verbosity > 0) then
          call info(ctx, "JSON dump of results written to '"//config%json_output//"'")

@@ -878,6 +878,32 @@ def set_calculator_mixer(ctx, calc, mixer):
     context_check(lib.tblite_set_calculator_mixer)(ctx, calc, mixer_value)
 
 
+def set_calculator_response(ctx, calc, response):
+    """Select the response properties evaluated in the single point calculation."""
+    if response is None:
+        names = []
+    elif isinstance(response, str):
+        names = [response]
+    elif isinstance(response, (tuple, list)):
+        names = list(response)
+    else:
+        raise TBLiteValueError("Expected response properties as a string or a list")
+
+    response_map = {
+        "hessian": lib.TBLITE_RESPONSE_HESSIAN,
+        "polarizability": lib.TBLITE_RESPONSE_POLARIZABILITY,
+        "polarizability-gradient": lib.TBLITE_RESPONSE_POLARIZABILITY_GRADIENT,
+    }
+    flags = 0
+    for name in names:
+        try:
+            flags |= response_map[name]
+        except KeyError as exc:
+            raise TBLiteValueError(f"Unknown response property '{name}'") from exc
+
+    context_check(lib.tblite_set_calculator_response)(ctx, calc, flags)
+
+
 def set_calculator_temperature_annealing(ctx, calc, annealing):
     """Set electronic-temperature annealing as start or (start, hold, cycles)."""
     if isinstance(annealing, (tuple, list)):
@@ -925,9 +951,6 @@ def set_calculator_verbosity(ctx, calc, verbosity: int):
 
 
 get_singlepoint = context_check(lib.tblite_get_singlepoint)
-calc_hessian = context_check(lib.tblite_get_hessian)
-calc_polarizability = context_check(lib.tblite_get_polarizability)
-calc_polarizability_gradient = context_check(lib.tblite_get_polarizability_gradient)
 
 
 def _delete_container(cont) -> None:

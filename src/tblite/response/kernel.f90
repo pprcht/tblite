@@ -25,71 +25,29 @@ module tblite_response_kernel
    use mctc_io, only : structure_type
    use tblite_container, only : container_cache
    use tblite_response_type, only : kernel_type, new_kernel, response_type
-   use tblite_scf_potential, only : potential_type
    use tblite_wavefunction_type, only : wavefunction_type
    use tblite_xtb_calculator, only : xtb_calculator
    implicit none
    private
 
-   public :: new_interaction_cache, get_interaction_potential
    public :: get_response_kernel, get_response_derivative, get_interaction_hessian
 
-   !> Caches of the interaction containers of a calculator
+   !> Caches of the interaction containers of a calculator, each one is
+   !> allocated if the respective container is present
    type, public :: interaction_cache
-      !> Cache of the electrostatic container
-      type(container_cache) :: coulomb
-      !> Cache of the dispersion container
-      type(container_cache) :: dispersion
+      !> Cache of the Coulomb interactions
+      type(container_cache), allocatable :: coulomb
+      !> Cache of the dispersion interaction
+      type(container_cache), allocatable :: dispersion
       !> Cache of the additional interaction containers
-      type(container_cache) :: interactions
-      !> Cache of the classical repulsion and halogen bond containers
-      type(container_cache) :: classical
+      type(container_cache), allocatable :: interactions
+      !> Cache of the repulsion interaction
+      type(container_cache), allocatable :: repulsion
+      !> Cache of the halogen bonding correction
+      type(container_cache), allocatable :: halogen
    end type interaction_cache
 
 contains
-
-subroutine new_interaction_cache(self, mol, calc)
-   !***********************************
-   !* Update the caches of all interaction containers for a structure.
-   !* The second-derivative procedures only read from the caches, which
-   !* can therefore be shared between threads afterwards.
-   !***********************************
-   !> Caches of the interaction containers
-   type(interaction_cache), intent(out) :: self
-   !> Molecular structure data
-   type(structure_type), intent(in) :: mol
-   !> Single-point calculator
-   type(xtb_calculator), intent(in) :: calc
-
-   if (allocated(calc%coulomb)) call calc%coulomb%update(mol, self%coulomb)
-   if (allocated(calc%dispersion)) call calc%dispersion%update(mol, self%dispersion)
-   if (allocated(calc%interactions)) call calc%interactions%update(mol, self%interactions)
-end subroutine new_interaction_cache
-
-subroutine get_interaction_potential(mol, calc, cache, wfn, pot)
-   !***********************************
-   !* Add the density dependent potential of all interactions at the state
-   !* given in wfn to pot.
-   !***********************************
-   !> Molecular structure data
-   type(structure_type), intent(in) :: mol
-   !> Single-point calculator
-   type(xtb_calculator), intent(in) :: calc
-   !> Caches of the interaction containers
-   type(interaction_cache), intent(inout) :: cache
-   !> Wavefunction data
-   type(wavefunction_type), intent(in) :: wfn
-   !> Density dependent potential
-   type(potential_type), intent(inout) :: pot
-
-   if (allocated(calc%coulomb)) call calc%coulomb%get_potential(mol, cache%coulomb, wfn, pot)
-   if (allocated(calc%dispersion)) then
-      call calc%dispersion%get_potential(mol, cache%dispersion, wfn, pot)
-   end if
-   if (allocated(calc%interactions)) then
-      call calc%interactions%get_potential(mol, cache%interactions, wfn, pot)
-   end if
-end subroutine get_interaction_potential
 
 subroutine get_response_kernel(mol, calc, cache, wfn, kernel, error, dwfn)
    !***********************************
@@ -189,11 +147,11 @@ subroutine get_interaction_hessian(mol, calc, cache, wfn, hessian, error)
    type(error_type), allocatable, intent(out) :: error
 
    if (allocated(calc%repulsion)) then
-      call calc%repulsion%get_hessian(mol, cache%classical, wfn, hessian, error)
+      call calc%repulsion%get_hessian(mol, cache%repulsion, wfn, hessian, error)
       if (allocated(error)) return
    end if
    if (allocated(calc%halogen)) then
-      call calc%halogen%get_hessian(mol, cache%classical, wfn, hessian, error)
+      call calc%halogen%get_hessian(mol, cache%halogen, wfn, hessian, error)
       if (allocated(error)) return
    end if
    if (allocated(calc%coulomb)) then

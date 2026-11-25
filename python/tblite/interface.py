@@ -502,6 +502,7 @@ class Calculator(Structure):
         "mixer-damping": library.set_calculator_mixer_damping,
         "mixer-memory": library.set_calculator_mixer_memory,
         "save-integrals": library.set_calculator_save_integrals,
+        "response": library.set_calculator_response,
         "temperature": library.set_calculator_temperature,
         "annealing": library.set_calculator_temperature_annealing,
         "verbosity": library.set_calculator_verbosity,
@@ -581,6 +582,7 @@ class Calculator(Structure):
          mixer-damping     Parameter for the SCC mixer          0.4
          mixer-memory      Number of SCC mixer history vectors  max-iter
          save-integrals    Keep integral matrices in results    0 (False)
+         response          Response properties to evaluate      None
          temperature       Electronic temperature for filling   9.500e-4
          annealing         Start or (start, hold, cycles)       None
          verbosity         Set verbosity of printout            1
@@ -591,6 +593,15 @@ class Calculator(Structure):
            The electronic temperature is given in Hartree, rather than Kelvin.
            The conversion factor from Kelvin to Hartree is the Boltzmann constant
            in Hartree/Kelvin (3.166808578545117e-6).
+
+           Response properties are given as one name or a list of names out of
+           hessian (including the dipole gradient), polarizability and
+           polarizability-gradient (including the polarizability). They are
+           evaluated in each following single point calculation, which tightens
+           the accuracy to at least 0.001. Only closed-shell molecules are
+           supported, the polarizability gradient additionally requires integer
+           occupation numbers. The ALPB, GBSA, GBE and GB solvation models are
+           supported, ddX models and other external interactions are not.
 
         Raises
         ------
@@ -700,51 +711,6 @@ class Calculator(Structure):
         _res = Result(res) if copy or res is None else res
         library.get_singlepoint(self._ctx, self._mol, self._calc, _res._res)
         return _res
-
-    def hessian(self, res: Result) -> Result:
-        """
-        Evaluate the analytic Hessian and the derivative of the dipole moment
-        with respect to the atomic positions. Both are stored in the provided
-        result container, which must hold the result of a single point calculation
-        for the current geometry.
-
-        The wavefunction has to be tightly converged, an accuracy of 0.001 or
-        smaller is recommended. Only available for closed-shell molecules.
-        The ALPB, GBSA, GBE and GB solvation models are supported, ddX models
-        and other external interactions are not.
-
-        Raises
-        ------
-        TBLiteRuntimeError
-            in case the calculation fails or is not supported
-        """
-        library.calc_hessian(self._ctx, self._mol, self._calc, res._res)
-        return res
-
-    def polarizability(self, res: Result, gradient: bool = False) -> Result:
-        """
-        Evaluate the analytic static dipole polarizability and optionally its
-        derivative with respect to the atomic positions. Both are stored in the
-        provided result container, which must hold the result of a single point
-        calculation for the current geometry.
-
-        The wavefunction has to be tightly converged, an accuracy of 0.001 or
-        smaller is recommended. Only available for closed-shell molecules,
-        the derivative additionally requires integer occupation numbers.
-        The ALPB, GBSA, GBE and GB solvation models are supported, ddX models
-        and other external interactions are not.
-
-        Raises
-        ------
-        TBLiteRuntimeError
-            in case the calculation fails or is not supported
-        """
-        library.calc_polarizability(self._ctx, self._mol, self._calc, res._res)
-        if gradient:
-            library.calc_polarizability_gradient(
-                self._ctx, self._mol, self._calc, res._res
-            )
-        return res
 
 
 def _cast(ctype, array):

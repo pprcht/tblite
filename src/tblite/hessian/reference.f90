@@ -22,55 +22,60 @@
 module tblite_hessian_reference
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
-   use tblite_adjlist, only : adjacency_list, new_adjacency_list
-   use tblite_basis_type, only : get_cutoff
-   use tblite_cutoff, only : get_lattice_points
+   use tblite_adjlist, only : adjacency_list
    use tblite_hessian_hamiltonian, only : get_scaled_overlap, get_hamiltonian_derivative
-   use tblite_integral_type, only : integral_type, new_integral
+   use tblite_integral_type, only : integral_type
    use tblite_response_cpscc, only : get_fock_response
    use tblite_response_integral, only : get_overlap_derivative, get_multipole_derivative
-   use tblite_response_kernel, only : interaction_cache, new_interaction_cache, &
-      & get_interaction_potential, get_response_derivative
+   use tblite_response_kernel, only : interaction_cache, get_response_derivative
    use tblite_response_type, only : response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_mulliken, only : get_mulliken_shell_charges
    use tblite_wavefunction_type, only : wavefunction_type
    use tblite_xtb_calculator, only : xtb_calculator
-   use tblite_xtb_h0, only : get_selfenergy, get_hamiltonian, get_hamiltonian_gradient
+   use tblite_xtb_h0, only : get_hamiltonian_gradient
    implicit none
    private
 
    public :: reference_data, new_reference_data, get_nuclear_perturbation
    public :: add_potential_fock, check_hessian_support
 
-   !> Quantities of the unperturbed system shared by all displacements
+   !> Quantities of the unperturbed system shared by all displacements.
+   !> The integrals, the neighbor list and the converged potential belong
+   !> to the single point calculation and are only referenced here.
    type :: reference_data
       !> Realspace cutoff of the integrals
       real(wp) :: cutoff
       !> Lattice points within the cutoff
-      real(wp), allocatable :: lattr(:, :)
+      real(wp), pointer :: lattr(:, :) => null()
       !> Neighbor list
-      type(adjacency_list) :: list
+      type(adjacency_list), pointer :: list => null()
       !> Derivative of the coordination numbers w.r.t. the atomic positions
-      real(wp), allocatable :: dcndr(:, :, :)
-      !> Self-energies and their derivative w.r.t. the coordination number
-      real(wp), allocatable :: selfenergy(:), dsedcn(:)
+      real(wp), pointer :: dcndr(:, :, :) => null()
+      !> Self-energies
+      real(wp), pointer :: selfenergy(:) => null()
+      !> Derivative of the self-energies w.r.t. the coordination number
+      real(wp), pointer :: dsedcn(:) => null()
       !> Integrals
-      type(integral_type) :: ints
+      type(integral_type), pointer :: ints => null()
+      !> Converged potential expanded to the orbitals
+      type(potential_type), pointer :: pot => null()
       !> Scaled overlap matrix of the core Hamiltonian
       real(wp), allocatable :: bmat(:, :)
-      !> Converged potential and a vanishing one
-      type(potential_type) :: pot, pot_zero
+      !> Vanishing potential
+      type(potential_type) :: pot_zero
       !> Gradient of the core Hamiltonian contracted with the converged density
       real(wp), allocatable :: gradient(:, :), dEdcn(:)
    end type reference_data
 
 contains
 
-subroutine new_reference_data(ref, mol, calc, wfn, cache)
+subroutine new_reference_data(ref, mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, &
+      & dsedcn, dcndr, pot)
    !***********************************
-   !* Collect the integrals and the converged potential of the unperturbed
-   !* system and update the caches of the interaction containers.
+   !* Reference the integrals and the converged potential of a single point
+   !* calculation and add the quantities of the unperturbed system that
+   !* only the nuclear derivatives require. All targets must outlive ref.
    !***********************************
    !> Quantities of the unperturbed system
    type(reference_data), intent(out) :: ref
@@ -80,50 +85,49 @@ subroutine new_reference_data(ref, mol, calc, wfn, cache)
    type(xtb_calculator), intent(in) :: calc
    !> Converged wavefunction data
    type(wavefunction_type), intent(in) :: wfn
-   !> Caches of the interaction containers
-   type(interaction_cache), intent(out) :: cache
+   !> Integrals of the single point calculation
+   type(integral_type), target, intent(in) :: ints
+   !> Lattice points within the cutoff
+   real(wp), target, intent(in) :: lattr(:, :)
+   !> Neighbor list
+   type(adjacency_list), target, intent(in) :: list
+   !> Realspace cutoff of the integrals
+   real(wp), intent(in) :: cutoff
+   !> Self-energies
+   real(wp), target, intent(in) :: selfenergy(:)
+   !> Derivative of the self-energies w.r.t. the coordination number
+   real(wp), target, intent(in) :: dsedcn(:)
+   !> Derivative of the coordination numbers w.r.t. the atomic positions
+   real(wp), target, intent(in) :: dcndr(:, :, :)
+   !> Converged potential expanded to the orbitals
+   type(potential_type), target, intent(in) :: pot
 
-   integer :: nat, nao, nsh
+   integer :: nat, nao
    real(wp) :: sigma(3, 3)
-   real(wp), allocatable :: cn(:), dcndL(:, :, :), h1(:, :, :), zero(:, :, :)
+   real(wp), allocatable :: zero(:, :, :)
 
    nat = mol%nat
    nao = calc%bas%nao
-   nsh = calc%bas%nsh
 
-   !>-- integrals and potential of the unperturbed system
-   ref%cutoff = get_cutoff(calc%bas)
-   call get_lattice_points(mol%periodic, mol%lattice, ref%cutoff, ref%lattr)
-   call new_adjacency_list(ref%list, mol, ref%lattr, ref%cutoff)
+   ref%cutoff = cutoff
+   ref%lattr => lattr
+   ref%list => list
+   ref%selfenergy => selfenergy
+   ref%dsedcn => dsedcn
+   ref%dcndr => dcndr
+   ref%ints => ints
+   ref%pot => pot
 
-   allocate(cn(nat), ref%dcndr(3, nat, nat), dcndL(3, 3, nat))
-   call calc%ncoord%get_cn(mol, cn, ref%dcndr, dcndL)
-   allocate(ref%selfenergy(nsh), ref%dsedcn(nsh))
-   call get_selfenergy(calc%h0, mol%id, calc%bas%ish_at, calc%bas%nsh_id, cn=cn, &
-      & selfenergy=ref%selfenergy, dsedcn=ref%dsedcn)
-
-   call new_integral(ref%ints, nao)
-   call get_hamiltonian(mol, ref%lattr, ref%list, calc%bas, calc%h0, ref%selfenergy, &
-      & ref%ints%overlap, ref%ints%dipole, ref%ints%quadrupole, ref%ints%hamiltonian)
    allocate(ref%bmat(nao, nao))
-   call get_scaled_overlap(mol, calc%bas, calc%h0, ref%ints%overlap, ref%cutoff, ref%bmat)
-
-   !>-- folding the potential is only required to expand it to the orbitals
-   call new_interaction_cache(cache, mol, calc)
-   call new_potential(ref%pot, mol, calc%bas, 1)
-   call ref%pot%reset
-   call get_interaction_potential(mol, calc, cache, wfn, ref%pot)
-   allocate(h1(nao, nao, 1))
-   call get_fock_response(calc, ref%ints, ref%pot, h1)
+   call get_scaled_overlap(mol, calc%bas, calc%h0, ints%overlap, cutoff, ref%bmat)
    call new_potential(ref%pot_zero, mol, calc%bas, 1)
    call ref%pot_zero%reset
 
    !>-- contribution of the core Hamiltonian to the gradient, which is
    !>   contained in the contraction with the first-order potential
    allocate(ref%gradient(3, nat), ref%dEdcn(nat), zero(nao, nao, 1), source=0.0_wp)
-   call get_hamiltonian_gradient(mol, ref%lattr, ref%list, calc%bas, calc%h0, &
-      & ref%selfenergy, ref%dsedcn, ref%pot_zero, wfn%density, zero, ref%dEdcn, &
-      & ref%gradient, sigma)
+   call get_hamiltonian_gradient(mol, lattr, list, calc%bas, calc%h0, selfenergy, &
+      & dsedcn, ref%pot_zero, wfn%density, zero, ref%dEdcn, ref%gradient, sigma)
 
 end subroutine new_reference_data
 

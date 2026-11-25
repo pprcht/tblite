@@ -33,6 +33,15 @@ module tblite_results
       real(wp), allocatable :: overlap(:, :)
       !> (Core) Hamiltonian integrals
       real(wp), allocatable :: hamiltonian(:, :)
+      !> Derivative of the dipole moment w.r.t. the atomic positions,
+      !> dipole_gradient(:, ic, iat) for the displacement of atom iat in direction ic
+      real(wp), allocatable :: dipole_gradient(:, :, :)
+      !> Static dipole polarizability
+      real(wp), allocatable :: polarizability(:, :)
+      !> Derivative of the polarizability w.r.t. the atomic positions,
+      !> polarizability_gradient(:, :, ic, iat) for the displacement of atom iat
+      !> in direction ic
+      real(wp), allocatable :: polarizability_gradient(:, :, :, :)
       !> Dictionary for storing additional results from post-processing
       type(double_dictionary_type), allocatable :: dict
    end type results_type

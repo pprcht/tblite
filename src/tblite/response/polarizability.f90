@@ -21,100 +21,79 @@
 module tblite_response_polarizability
    use mctc_env, only : wp, error_type, fatal_error
    use mctc_io, only : structure_type
-   use tblite_adjlist, only : adjacency_list, new_adjacency_list
-   use tblite_basis_type, only : get_cutoff
-   use tblite_context, only : context_type
-   use tblite_cutoff, only : get_lattice_points
-   use tblite_integral_type, only : integral_type, new_integral
+   use tblite_integral_type, only : integral_type
    use tblite_partition, only : serial_work_partition, operator(==)
    use tblite_response_field, only : xtb_field_response
-   use tblite_response_kernel, only : interaction_cache, new_interaction_cache, &
-      & get_response_kernel
    use tblite_response_type, only : kernel_type
    use tblite_scf, only : potential_type, new_potential
    use tblite_wavefunction_mulliken, only : get_mulliken_atomic_multipoles
    use tblite_wavefunction_type, only : wavefunction_type, new_wavefunction
    use tblite_xtb_calculator, only : xtb_calculator
-   use tblite_xtb_h0, only : get_selfenergy, get_hamiltonian
    implicit none
    private
 
    public :: xtb_polarizability, check_response_support
 
+   !> First-order response to a homogeneous electric field in one direction
+   type, public :: field_data
+      !> First-order density matrix and Hamiltonian
+      real(wp), allocatable :: dp(:, :, :), dh(:, :, :)
+      !> First-order potential including the field
+      type(potential_type) :: pot
+      !> First-order charges and multipole moments
+      type(wavefunction_type) :: wfn
+      !> Derivative of the response kernel along the first-order moments
+      type(kernel_type) :: kernel
+   end type field_data
+
 contains
 
-subroutine xtb_polarizability(ctx, mol, calc, wfn, alpha)
+subroutine xtb_polarizability(mol, calc, wfn, ints, kernel, field, alpha, error)
    !***********************************
    !* Static dipole polarizability alpha(a, b) = dmu_a/dF_b from one
    !* coupled-perturbed field response per Cartesian direction.
-   !* Requires the converged wavefunction of a preceding single point
-   !* calculation with the same calculator. Failures are reported in ctx.
+   !* The field responses are returned for the derivative of the
+   !* polarizability, their kernel derivatives are not set up here.
    !***********************************
-   !> Calculation context
-   type(context_type), intent(inout) :: ctx
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
    !> Single-point calculator
    type(xtb_calculator), intent(in) :: calc
    !> Converged wavefunction data
    type(wavefunction_type), intent(in) :: wfn
+   !> Integrals of the single point calculation
+   type(integral_type), intent(in) :: ints
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
+   !> Field response for the three directions
+   type(field_data), intent(out) :: field(3)
    !> Polarizability tensor
    real(wp), intent(out) :: alpha(3, 3)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
 
-   integer :: idir
-   real(wp) :: cutoff
-   real(wp), allocatable :: cn(:), lattr(:, :), selfenergy(:)
-   real(wp), allocatable :: dh(:, :, :), dp(:, :, :), ddpat(:, :, :)
-   type(integral_type) :: ints
-   type(interaction_cache) :: cache
-   type(kernel_type) :: kernel
-   type(adjacency_list) :: list
-   type(potential_type) :: pot
-   type(wavefunction_type) :: wfn_r
-   type(error_type), allocatable :: error
+   integer :: idir, nat, nao, nsh
+   real(wp), allocatable :: ddpat(:, :, :)
 
+   nat = mol%nat
+   nao = calc%bas%nao
+   nsh = calc%bas%nsh
    alpha(:, :) = 0.0_wp
-
-   call check_response_support(mol, calc, wfn, error)
-   if (.not.allocated(error)) then
-      call new_interaction_cache(cache, mol, calc)
-      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
-   end if
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
-
-   if (allocated(calc%ncoord)) then
-      allocate(cn(mol%nat))
-      call calc%ncoord%get_cn(mol, cn)
-   end if
-   allocate(selfenergy(calc%bas%nsh))
-   call get_selfenergy(calc%h0, mol%id, calc%bas%ish_at, calc%bas%nsh_id, cn=cn, &
-      & selfenergy=selfenergy)
-
-   cutoff = get_cutoff(calc%bas)
-   call get_lattice_points(mol%periodic, mol%lattice, cutoff, lattr)
-   call new_adjacency_list(list, mol, lattr, cutoff)
-   call new_integral(ints, calc%bas%nao)
-   call get_hamiltonian(mol, lattr, list, calc%bas, calc%h0, selfenergy, &
-      & ints%overlap, ints%dipole, ints%quadrupole, ints%hamiltonian)
-
-   call new_potential(pot, mol, calc%bas, wfn%nspin)
-   call new_wavefunction(wfn_r, mol%nat, calc%bas%nsh, calc%bas%nao, wfn%nspin, wfn%kt)
-   allocate(dh(calc%bas%nao, calc%bas%nao, 1), dp(calc%bas%nao, calc%bas%nao, 1), &
-      & ddpat(3, mol%nat, 1))
+   allocate(ddpat(3, nat, 1))
 
    do idir = 1, 3
-      call xtb_field_response(mol, calc, wfn, ints, kernel, idir, dp, dh, pot, wfn_r, error)
-      if (allocated(error)) then
-         call ctx%set_error(error)
-         return
-      end if
+      associate(fld => field(idir))
+         allocate(fld%dp(nao, nao, 1), fld%dh(nao, nao, 1))
+         call new_potential(fld%pot, mol, calc%bas, 1)
+         call new_wavefunction(fld%wfn, nat, nsh, nao, 1, wfn%kt)
+         call xtb_field_response(mol, calc, wfn, ints, kernel, idir, fld%dp, fld%dh, &
+            & fld%pot, fld%wfn, error)
+         if (allocated(error)) return
 
-      !>-- mu = sum_A (R_A q_A + d_A), the atomic dipoles enter for all methods
-      call get_mulliken_atomic_multipoles(calc%bas, ints%dipole, dp, ddpat)
-      alpha(:, idir) = matmul(mol%xyz, wfn_r%qat(:, 1)) + sum(ddpat(:, :, 1), dim=2)
+         !>-- mu = sum_A (R_A q_A + d_A), the atomic dipoles enter for all methods
+         call get_mulliken_atomic_multipoles(calc%bas, ints%dipole, fld%dp, ddpat)
+         alpha(:, idir) = matmul(mol%xyz, fld%wfn%qat(:, 1)) + sum(ddpat(:, :, 1), dim=2)
+      end associate
    end do
 
 end subroutine xtb_polarizability

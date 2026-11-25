@@ -20,20 +20,17 @@
 !> Derivative of the static dipole polarizability of a self-consistent xTB
 !> calculation w.r.t. the atomic positions
 module tblite_hessian_polarizability
-   use mctc_env, only : wp, error_type, fatal_error
+   use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
-   use tblite_context, only : context_type
-   use tblite_hessian_reference, only : reference_data, new_reference_data, &
-      & get_nuclear_perturbation, add_potential_fock, check_hessian_support
+   use tblite_hessian_reference, only : reference_data, get_nuclear_perturbation, &
+      & add_potential_fock
    use tblite_response_cpscc, only : solve_cpscc, get_fock_response
-   use tblite_response_density, only : density_response, density_response_derivative, &
-      & has_integer_occupation
-   use tblite_response_field, only : xtb_field_response
+   use tblite_response_density, only : density_response, density_response_derivative
    use tblite_response_integral, only : get_multipole_derivative
    use tblite_response_kernel, only : interaction_cache, get_response_kernel, &
       & get_response_derivative
    use tblite_response_nuclear, only : xtb_nuclear_response
-   use tblite_response_polarizability, only : check_response_support
+   use tblite_response_polarizability, only : field_data
    use tblite_response_type, only : kernel_type, response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
@@ -46,21 +43,10 @@ module tblite_hessian_polarizability
 
    public :: xtb_polarizability_gradient
 
-   !> First-order response to a homogeneous electric field in one direction
-   type :: field_data
-      !> First-order density matrix and Hamiltonian
-      real(wp), allocatable :: dp(:, :, :), dh(:, :, :)
-      !> First-order potential including the field
-      type(potential_type) :: pot
-      !> First-order charges and multipole moments
-      type(wavefunction_type) :: wfn
-      !> Derivative of the response kernel along the first-order moments
-      type(kernel_type) :: kernel
-   end type field_data
-
 contains
 
-subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
+subroutine xtb_polarizability_gradient(mol, calc, wfn, ref, cache, kernel, field, dalpha, &
+      & error)
    !***********************************
    !* Derivative of the polarizability w.r.t. the atomic positions,
    !* dalpha(a, b, ic, iat) for the displacement of atom iat in direction ic.
@@ -68,65 +54,40 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
    !* differentiated w.r.t. the field. The resulting equations for the mixed
    !* second-order density matrix have the same response operator, their
    !* right-hand side contains first-order quantities only.
-   !* Requires integer occupation numbers and the converged wavefunction of
-   !* a preceding single point calculation with the same calculator.
-   !* Failures are reported in ctx.
+   !* Requires integer occupation numbers and the field responses of the
+   !* polarizability, whose kernel derivatives are set up here.
    !***********************************
-   !> Calculation context
-   type(context_type), intent(inout) :: ctx
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
    !> Single-point calculator
    type(xtb_calculator), intent(in) :: calc
    !> Converged wavefunction data
    type(wavefunction_type), intent(in) :: wfn
+   !> Quantities of the unperturbed system
+   type(reference_data), intent(in) :: ref
+   !> Caches of the interaction containers
+   type(interaction_cache), intent(inout) :: cache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
+   !> Field response for the three directions
+   type(field_data), intent(inout) :: field(3)
    !> Derivative of the polarizability tensor
    real(wp), intent(out) :: dalpha(:, :, :, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
 
-   integer :: nat, nao, nsh, iat, idir
-   type(reference_data) :: ref
-   type(interaction_cache) :: cache
-   type(kernel_type) :: kernel
-   type(field_data) :: field(3)
-   type(error_type), allocatable :: error, local_error
+   integer :: nat, iat, idir
+   type(error_type), allocatable :: local_error
 
    nat = mol%nat
-   nao = calc%bas%nao
-   nsh = calc%bas%nsh
    dalpha(:, :, :, :) = 0.0_wp
 
-   call check_response_support(mol, calc, wfn, error)
-   if (.not.allocated(error)) call check_hessian_support(calc, error)
-   if (.not.allocated(error) .and. .not.has_integer_occupation(wfn)) then
-      call fatal_error(error, "Analytic polarizability derivative requires integer "// &
-         & "occupation numbers")
-   end if
-   if (.not.allocated(error)) then
-      call new_reference_data(ref, mol, calc, wfn, cache)
-      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
-   end if
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
-
-   !>-- field response and the derivative of the kernel along it
+   !>-- derivative of the kernel along the field response
    do idir = 1, 3
-      associate(fld => field(idir))
-         allocate(fld%dp(nao, nao, 1), fld%dh(nao, nao, 1))
-         call new_potential(fld%pot, mol, calc%bas, 1)
-         call new_wavefunction(fld%wfn, nat, nsh, nao, 1, wfn%kt)
-         call xtb_field_response(mol, calc, wfn, ref%ints, kernel, idir, fld%dp, fld%dh, &
-            & fld%pot, fld%wfn, error)
-         if (allocated(error)) exit
-         call get_response_kernel(mol, calc, cache, wfn, fld%kernel, error, dwfn=fld%wfn)
-         if (allocated(error)) exit
-      end associate
+      call get_response_kernel(mol, calc, cache, wfn, field(idir)%kernel, error, &
+         & dwfn=field(idir)%wfn)
+      if (allocated(error)) return
    end do
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
 
    !$omp parallel do schedule(dynamic) default(none) &
    !$omp shared(mol, calc, wfn, ref, cache, kernel, field, nat, dalpha, error) &
@@ -140,7 +101,6 @@ subroutine xtb_polarizability_gradient(ctx, mol, calc, wfn, dalpha)
          !$omp end critical (tblite_hessian_polarizability_error)
       end if
    end do
-   if (allocated(error)) call ctx%set_error(error)
 
 end subroutine xtb_polarizability_gradient
 

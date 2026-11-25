@@ -74,6 +74,11 @@ module tblite_xtb_calculator
       integer :: max_iter = 250
       !> Store calculated integral intermediates
       logical :: save_integrals = .false.
+      !> Evaluate the static dipole polarizability in the single point calculation
+      logical :: polarizability = .false.
+      !> Evaluate the derivative of the polarizability w.r.t. the atomic positions
+      !> in the single point calculation
+      logical :: polarizability_gradient = .false.
       !> List of additional interaction containers
       type(container_list), allocatable :: interactions
       !> Share of the interaction loops evaluated by this calculator

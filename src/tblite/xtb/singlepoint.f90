@@ -36,6 +36,7 @@ module tblite_xtb_singlepoint
    use tblite_output_format, only : format_string
    use tblite_post_processing_list, only : post_processing_list
    use tblite_post_processing_type, only : collect_containers_caches
+   use tblite_response_kernel, only : interaction_cache
    use tblite_results, only : results_type
    use tblite_scf, only : mixer_type, new_mixer, scf_info, next_scf, &
       & get_mixer_dimension, potential_type, new_potential
@@ -48,6 +49,7 @@ module tblite_xtb_singlepoint
    use tblite_xtb_calculator, only : xtb_calculator
    use tblite_xtb_h0, only : get_selfenergy, get_hamiltonian, get_occupation, &
       & get_hamiltonian_gradient
+   use tblite_xtb_response, only : xtb_response, check_response, response_accuracy
    implicit none
    private
 
@@ -72,7 +74,7 @@ contains
 
 !> Entry point for performing single point calculation using the xTB calculator
 subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigma, &
-   & verbosity, results, post_process)
+   & verbosity, results, post_process, hessian)
    !> Calculation context
    type(context_type), intent(inout) :: ctx
    !> Molecular structure data
@@ -95,10 +97,16 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
    type(results_type), intent(out), optional :: results
    !> List of post-processing methods
    type(post_processing_list), intent(inout), optional :: post_process
+   !> Molecular Hessian, dimension 3*nat by 3*nat. Requesting it, or the
+   !> polarizability via the calculator, tightens the accuracy of the SCF
+   real(wp), contiguous, intent(out), optional :: hessian(:, :)
 
    logical :: grad, converged, econverged, pconverged, tconverged
+   logical :: response, nuclear
    integer :: prlevel
    real(wp) :: econv, pconv, cutoff, elast, nel, target_kt, elevated_kt, anneal_fraction
+   real(wp) :: acc
+   real(wp), allocatable :: dipgrad(:, :, :), alpha(:, :), dalpha(:, :, :, :)
    real(wp) :: pnorm
    integer :: anneal_hold, anneal_steps
    integer, parameter :: default_anneal_hold = 50, default_anneal_steps = 50
@@ -115,6 +123,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
    class(solver_type), allocatable :: solver
    type(adjacency_list) :: list
    type(cache_list), allocatable :: caches
+   type(interaction_cache) :: icaches
 
    integer :: iscf, spin
 
@@ -126,15 +135,39 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
       prlevel = ctx%verbosity
    end if
 
-   econv = 1.0e-6_wp*accuracy
-   pconv = 2.0e-5_wp*accuracy
-
    ! reducing unpartitioned contributions would multiply them by the rank count
    call ctx%check_partition(calc%partition, error)
    if (allocated(error)) then
       call ctx%set_error(error)
       return
    end if
+
+   !>-- response properties are rejected before the SCF if not available
+   response = present(hessian) .or. calc%polarizability .or. calc%polarizability_gradient
+   nuclear = present(hessian) .or. calc%polarizability_gradient
+   acc = accuracy
+   if (response) then
+      if ((calc%polarizability .or. calc%polarizability_gradient) &
+         & .and. .not.present(results)) then
+         call fatal_error(error, "Polarizability requested without results container")
+      else
+         call check_response(mol, calc, wfn, nuclear, error)
+      end if
+      if (allocated(error)) then
+         call ctx%set_error(error)
+         return
+      end if
+      if (acc > response_accuracy) then
+         acc = response_accuracy
+         if (prlevel > 0) then
+            call ctx%message("Tightening accuracy for the calculation of response properties")
+            call ctx%message("")
+         end if
+      end if
+   end if
+
+   econv = 1.0e-6_wp*acc
+   pconv = 2.0e-5_wp*acc
 
    grad = present(gradient) .and. present(sigma)
 
@@ -147,6 +180,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
       gradient(:, :) = 0.0_wp
       sigma(:, :) = 0.0_wp
    end if
+   if (present(hessian)) hessian(:, :) = 0.0_wp
 
    call get_occupation(mol, calc%bas, calc%h0, wfn%nocc, wfn%n0at, wfn%n0sh)
    nel = sum(wfn%n0at) - mol%charge
@@ -233,7 +267,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
    call timer%push("hamiltonian")
    if (allocated(calc%ncoord)) then
       allocate(cn(mol%nat))
-      if (grad) then
+      if (grad .or. nuclear) then
          allocate(dcndr(3, mol%nat, mol%nat), dcndL(3, 3, mol%nat))
       end if
       call calc%ncoord%get_cn(mol, cn, dcndr, dcndL)
@@ -243,7 +277,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
    call get_selfenergy(calc%h0, mol%id, calc%bas%ish_at, calc%bas%nsh_id, cn=cn, &
       & selfenergy=selfenergy, dsedcn=dsedcn)
 
-   cutoff = get_cutoff(calc%bas, accuracy)
+   cutoff = get_cutoff(calc%bas, acc)
    call get_lattice_points(mol%periodic, mol%lattice, cutoff, lattr)
    call new_adjacency_list(list, mol, lattr, cutoff)
 
@@ -418,6 +452,46 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
       end if
    end if
 
+   if (response .and. converged) then
+      call timer%push("response")
+      if (present(hessian) .and. .not.allocated(wdensity)) then
+         allocate(wdensity(calc%bas%nao, calc%bas%nao, wfn%nspin))
+         call solver%get_wdensity(wfn%coeff, ints%overlap, wfn%emo, wfn%focc, wdensity, &
+            & error)
+      end if
+      if (.not.allocated(error)) then
+         if (present(hessian) .and. present(results)) allocate(dipgrad(3, 3, mol%nat))
+         if (calc%polarizability .or. calc%polarizability_gradient) allocate(alpha(3, 3))
+         if (calc%polarizability_gradient) allocate(dalpha(3, 3, 3, mol%nat))
+
+         !>-- the caches are lent to the response and returned for post-processing
+         call move_alloc(ccache, icaches%coulomb)
+         call move_alloc(dcache, icaches%dispersion)
+         call move_alloc(icache, icaches%interactions)
+         call move_alloc(rcache, icaches%repulsion)
+         call move_alloc(hcache, icaches%halogen)
+         call xtb_response(mol, calc, wfn, ints, lattr, list, cutoff, selfenergy, dsedcn, &
+            & dcndr, pot, icaches, error, hessian=hessian, wdensity=wdensity, &
+            & dipgrad=dipgrad, alpha=alpha, dalpha=dalpha)
+         call move_alloc(icaches%coulomb, ccache)
+         call move_alloc(icaches%dispersion, dcache)
+         call move_alloc(icaches%interactions, icache)
+         call move_alloc(icaches%repulsion, rcache)
+         call move_alloc(icaches%halogen, hcache)
+      end if
+      call timer%pop
+      if (allocated(error)) then
+         call ctx%set_error(error)
+         call ctx%delete_solver(solver)
+         return
+      end if
+      if (present(results)) then
+         if (allocated(dipgrad)) call move_alloc(dipgrad, results%dipole_gradient)
+         if (allocated(alpha)) call move_alloc(alpha, results%polarizability)
+         if (allocated(dalpha)) call move_alloc(dalpha, results%polarizability_gradient)
+      end if
+   end if
+
    call ctx%delete_solver(solver)
    if (ctx%failed()) return
 
@@ -426,7 +500,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
       allocate(caches)
       call collect_containers_caches(rcache, ccache, hcache, dcache, icache, calc, caches)
       allocate(results%dict)
-      call post_process%compute(mol, wfn, ints, calc, caches, accuracy, ctx, &
+      call post_process%compute(mol, wfn, ints, calc, caches, acc, ctx, &
          & timer, prlevel, results)
       deallocate(caches)
       call timer%pop()
@@ -450,7 +524,7 @@ subroutine xtb_singlepoint(ctx, mol, calc, wfn, accuracy, energy, gradient, sigm
       real(wp) :: ttime, stime
       character(len=*), parameter :: label(*) = [character(len=20):: &
          & "repulsion", "halogen", "dispersion", "interactions", &
-         & "coulomb", "hamiltonian", "post processing", "scc"]
+         & "coulomb", "hamiltonian", "response", "post processing", "scc"]
       if (prlevel > 0) then
          ttime = timer%get("total")
          call ctx%message(" total:"//repeat(" ", 16)//format_time(ttime))

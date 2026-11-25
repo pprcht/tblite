@@ -57,12 +57,6 @@ module tblite_api_result
       real(wp), allocatable :: sigma(:, :)
       !> Molecular Hessian
       real(wp), allocatable :: hessian(:, :)
-      !> Derivative of the dipole moment w.r.t. the atomic positions
-      real(wp), allocatable :: dipgrad(:, :, :)
-      !> Static dipole polarizability
-      real(wp), allocatable :: alpha(:, :)
-      !> Derivative of the polarizability w.r.t. the atomic positions
-      real(wp), allocatable :: dalpha(:, :, :, :)
       !> Wavefunction
       type(wavefunction_type), allocatable :: wfn
       !> Additional results
@@ -353,12 +347,17 @@ subroutine get_result_dipole_gradient_api(verror, vres, dipgrad) &
    call get_result(verror, vres, error, res, ok)
    if (.not.ok) return
 
-   if (.not.allocated(res%dipgrad)) then
+   if (.not.allocated(res%results)) then
+      call fatal_error(error%ptr, "Result does not contain dipole gradient")
+      return
+   end if
+   if (.not.allocated(res%results%dipole_gradient)) then
       call fatal_error(error%ptr, "Result does not contain dipole gradient")
       return
    end if
 
-   dipgrad(:size(res%dipgrad)) = reshape(res%dipgrad, [size(res%dipgrad)])
+   dipgrad(:size(res%results%dipole_gradient)) = &
+      & reshape(res%results%dipole_gradient, [size(res%results%dipole_gradient)])
 end subroutine get_result_dipole_gradient_api
 
 
@@ -376,12 +375,17 @@ subroutine get_result_polarizability_api(verror, vres, alpha) &
    call get_result(verror, vres, error, res, ok)
    if (.not.ok) return
 
-   if (.not.allocated(res%alpha)) then
+   if (.not.allocated(res%results)) then
+      call fatal_error(error%ptr, "Result does not contain polarizability")
+      return
+   end if
+   if (.not.allocated(res%results%polarizability)) then
       call fatal_error(error%ptr, "Result does not contain polarizability")
       return
    end if
 
-   alpha(:size(res%alpha)) = reshape(res%alpha, [size(res%alpha)])
+   alpha(:size(res%results%polarizability)) = &
+      & reshape(res%results%polarizability, [size(res%results%polarizability)])
 end subroutine get_result_polarizability_api
 
 
@@ -399,12 +403,17 @@ subroutine get_result_polarizability_gradient_api(verror, vres, dalpha) &
    call get_result(verror, vres, error, res, ok)
    if (.not.ok) return
 
-   if (.not.allocated(res%dalpha)) then
+   if (.not.allocated(res%results)) then
+      call fatal_error(error%ptr, "Result does not contain polarizability gradient")
+      return
+   end if
+   if (.not.allocated(res%results%polarizability_gradient)) then
       call fatal_error(error%ptr, "Result does not contain polarizability gradient")
       return
    end if
 
-   dalpha(:size(res%dalpha)) = reshape(res%dalpha, [size(res%dalpha)])
+   dalpha(:size(res%results%polarizability_gradient)) = &
+      & reshape(res%results%polarizability_gradient, [size(res%results%polarizability_gradient)])
 end subroutine get_result_polarizability_gradient_api
 
 

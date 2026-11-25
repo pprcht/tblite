@@ -1004,15 +1004,15 @@ def test_response():
     calc = Calculator("GFN2-xTB", numbers, positions)
     calc.set("accuracy", 1.0e-3)
 
-    with raises(TBLiteRuntimeError, match="single point"):
-        calc.hessian(Result())
+    with raises(TBLiteValueError, match="response property"):
+        calc.set("response", "raman")
 
     res = calc.singlepoint()
     with raises(TBLiteRuntimeError, match="Hessian"):
         res.get("hessian")
 
-    calc.hessian(res)
-    calc.polarizability(res, gradient=True)
+    calc.set("response", ["hessian", "polarizability-gradient"])
+    calc.singlepoint(res)
 
     hessian = res.get("hessian")
     dipgrad = res.get("dipole-gradient")
@@ -1036,6 +1036,7 @@ def test_response():
     assert dalpha[0, 2, 2, 2] == approx(10.488106857003, abs=10 * THR)
 
     # numerical derivative of the dipole moment along one coordinate
+    calc.set("response", None)
     step = 1.0e-4
     dipoles = []
     for sign in (+1, -1):
@@ -1068,10 +1069,9 @@ def test_response_solvation():
     calc = Calculator("GFN2-xTB", numbers, positions)
     calc.set("accuracy", 1.0e-3)
     calc.add("alpb-solvation", "water")
+    calc.set("response", ["hessian", "polarizability-gradient"])
 
     res = calc.singlepoint()
-    calc.hessian(res)
-    calc.polarizability(res, gradient=True)
 
     hessian = res.get("hessian")
     dipgrad = res.get("dipole-gradient")

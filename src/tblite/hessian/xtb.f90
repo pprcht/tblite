@@ -22,16 +22,13 @@
 module tblite_hessian_xtb
    use mctc_env, only : wp, error_type
    use mctc_io, only : structure_type
-   use tblite_blas, only : gemv, gemm
-   use tblite_context, only : context_type
+   use tblite_blas, only : gemv
    use tblite_hessian_hamiltonian, only : get_hamiltonian_hessian
    use tblite_hessian_multipole, only : get_multipole_band_hessian
-   use tblite_hessian_reference, only : reference_data, new_reference_data, &
-      & get_nuclear_perturbation, check_hessian_support
+   use tblite_hessian_reference, only : reference_data, get_nuclear_perturbation
    use tblite_response_kernel, only : interaction_cache, get_response_kernel, &
       & get_response_derivative, get_interaction_hessian
    use tblite_response_nuclear, only : xtb_nuclear_response
-   use tblite_response_polarizability, only : check_response_support
    use tblite_response_type, only : kernel_type, response_type, new_response
    use tblite_scf, only : potential_type, new_potential
    use tblite_scf_iterator, only : get_qat_from_qsh
@@ -46,7 +43,7 @@ module tblite_hessian_xtb
 
 contains
 
-subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
+subroutine xtb_hessian(mol, calc, wfn, ref, cache, kernel, wdensity, hessian, error, dipgrad)
    !***********************************
    !* Analytic Hessian, ordered as hessian(3*(jat-1)+jc, 3*(iat-1)+ic).
    !* Each column is the derivative of the gradient w.r.t. one coordinate
@@ -56,47 +53,38 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
    !* and is added for the complete matrix at once.
    !* The derivative of the dipole moment w.r.t. the atomic positions is
    !* available from the same first-order wavefunctions.
-   !* Requires the converged wavefunction of a preceding single point
-   !* calculation with the same calculator. Failures are reported in ctx.
    !***********************************
-   !> Calculation context
-   type(context_type), intent(inout) :: ctx
    !> Molecular structure data
    type(structure_type), intent(in) :: mol
    !> Single-point calculator
    type(xtb_calculator), intent(in) :: calc
    !> Converged wavefunction data
    type(wavefunction_type), intent(in) :: wfn
+   !> Quantities of the unperturbed system
+   type(reference_data), intent(in) :: ref
+   !> Caches of the interaction containers
+   type(interaction_cache), intent(inout) :: cache
+   !> Response kernel at the converged state
+   type(kernel_type), intent(in) :: kernel
+   !> Energy-weighted density matrix
+   real(wp), intent(in) :: wdensity(:, :, :)
    !> Molecular Hessian, dimension 3*nat by 3*nat
-   real(wp), intent(out) :: hessian(:, :)
+   real(wp), contiguous, intent(out) :: hessian(:, :)
+   !> Error handling
+   type(error_type), allocatable, intent(out) :: error
    !> Derivative of the dipole moment, dipgrad(:, ic, iat) for the
    !> displacement of atom iat in direction ic
    real(wp), intent(out), optional :: dipgrad(:, :, :)
 
-   integer :: nat, nao, iat
+   integer :: nat, iat
    logical :: dipole
-   real(wp), allocatable :: wmat(:, :), dmu(:, :, :)
-   type(reference_data) :: ref
-   type(interaction_cache) :: cache
-   type(kernel_type) :: kernel
-   type(error_type), allocatable :: error, local_error
+   real(wp), allocatable :: dmu(:, :, :)
+   type(error_type), allocatable :: local_error
 
    nat = mol%nat
-   nao = calc%bas%nao
    dipole = present(dipgrad)
    hessian(:, :) = 0.0_wp
    if (dipole) dipgrad(:, :, :) = 0.0_wp
-
-   call check_response_support(mol, calc, wfn, error)
-   if (.not.allocated(error)) call check_hessian_support(calc, error)
-   if (.not.allocated(error)) then
-      call new_reference_data(ref, mol, calc, wfn, cache)
-      call get_response_kernel(mol, calc, cache, wfn, kernel, error)
-   end if
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
 
    !>-- response part, one coupled-perturbed solution per coordinate,
    !>   the caches are only read from here on
@@ -113,26 +101,20 @@ subroutine xtb_hessian(ctx, mol, calc, wfn, hessian, dipgrad)
          !$omp end critical (tblite_hessian_xtb_error)
       end if
    end do
-   if (allocated(error)) then
-      call ctx%set_error(error)
-      return
-   end if
+   if (allocated(error)) return
    if (dipole) dipgrad(:, :, :) = dmu
 
    hessian(:, :) = 0.5_wp * (hessian + transpose(hessian))
 
    !>-- explicit part, second derivatives at fixed density
-   allocate(wmat(nao, nao))
-   call get_wdensity(wfn, wmat)
    call get_hamiltonian_hessian(mol, calc%bas, calc%h0, calc%ncoord, ref%selfenergy, &
-      & ref%dsedcn, wfn%density(:, :, 1), wmat, ref%pot%vao(:, 1), ref%dcndr, ref%lattr, &
-      & ref%cutoff, hessian)
+      & ref%dsedcn, wfn%density(:, :, 1), wdensity(:, :, 1), ref%pot%vao(:, 1), &
+      & ref%dcndr, ref%lattr, ref%cutoff, hessian)
    if (allocated(calc%coulomb%aes2)) then
       call get_multipole_band_hessian(mol, calc%bas, wfn%density(:, :, 1), &
          & ref%pot%vdp(:, :, 1), ref%pot%vqp(:, :, 1), ref%lattr, ref%cutoff, hessian)
    end if
    call get_interaction_hessian(mol, calc, cache, wfn, hessian, error)
-   if (allocated(error)) call ctx%set_error(error)
 
 end subroutine xtb_hessian
 
@@ -243,26 +225,5 @@ subroutine get_response_columns(mol, calc, wfn, ref, cache, kernel, iat, dipole,
    if (allocated(error)) return
    columns(:, :) = columns + reshape(response%hessian, [3*nat, 3])
 end subroutine get_response_columns
-
-subroutine get_wdensity(wfn, wmat)
-   !***********************************
-   !* Energy-weighted density matrix of a restricted wavefunction,
-   !* W = sum_p f_p e_p C_p C_p^T with the occupations of both spin channels.
-   !***********************************
-   !> Wavefunction data
-   type(wavefunction_type), intent(in) :: wfn
-   !> Energy-weighted density matrix
-   real(wp), intent(out) :: wmat(:, :)
-
-   integer :: iao
-   real(wp), allocatable :: scratch(:, :)
-
-   allocate(scratch(size(wmat, 1), size(wmat, 2)))
-   do iao = 1, size(wmat, 2)
-      scratch(:, iao) = wfn%coeff(:, iao, 1) &
-         & * (wfn%focc(iao, 1) + wfn%focc(iao, 2)) * wfn%emo(iao, 1)
-   end do
-   call gemm(scratch, wfn%coeff(:, :, 1), wmat, transb="t")
-end subroutine get_wdensity
 
 end module tblite_hessian_xtb

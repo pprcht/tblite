@@ -1834,8 +1834,8 @@ int test_response_h2co(void)
     if (tblite_check(ctx))
         goto err;
 
-    // response properties require a preceding single point calculation
-    tblite_get_hessian(ctx, mol, calc, res);
+    // unknown response properties are rejected
+    tblite_set_calculator_response(ctx, calc, 8);
     if (!tblite_check(ctx))
         goto err;
 
@@ -1847,19 +1847,12 @@ int test_response_h2co(void)
 
     show(error);
 
+    tblite_set_calculator_response(ctx, calc,
+        TBLITE_RESPONSE_HESSIAN | TBLITE_RESPONSE_POLARIZABILITY_GRADIENT);
+    if (tblite_check(ctx))
+        goto err;
+
     tblite_get_singlepoint(ctx, mol, calc, res);
-    if (tblite_check(ctx))
-        goto err;
-
-    tblite_get_hessian(ctx, mol, calc, res);
-    if (tblite_check(ctx))
-        goto err;
-
-    tblite_get_polarizability(ctx, mol, calc, res);
-    if (tblite_check(ctx))
-        goto err;
-
-    tblite_get_polarizability_gradient(ctx, mol, calc, res);
     if (tblite_check(ctx))
         goto err;
 
@@ -1928,11 +1921,21 @@ int test_response_h2co(void)
         goto err;
 
     // a new single point calculation invalidates the response properties
+    tblite_set_calculator_response(ctx, calc, 0);
+    if (tblite_check(ctx))
+        goto err;
+
     tblite_get_singlepoint(ctx, mol, calc, res);
     if (tblite_check(ctx))
         goto err;
 
     tblite_get_result_polarizability(error, res, alpha);
+    if (!tblite_check(error))
+        goto err;
+
+    show(error);
+
+    tblite_get_result_hessian(error, res, hessian);
     if (!tblite_check(error))
         goto err;
 
@@ -2017,24 +2020,17 @@ int test_hessian_solvation_h2co(void)
     if (tblite_check(ctx))
         goto err;
 
-    tblite_get_singlepoint(ctx, mol, calc, res);
+    tblite_set_calculator_response(ctx, calc,
+        TBLITE_RESPONSE_HESSIAN | TBLITE_RESPONSE_POLARIZABILITY_GRADIENT);
     if (tblite_check(ctx))
         goto err;
 
-    tblite_get_hessian(ctx, mol, calc, res);
+    tblite_get_singlepoint(ctx, mol, calc, res);
     if (tblite_check(ctx))
         goto err;
 
     tblite_get_result_hessian(error, res, hessian);
     if (tblite_check(error))
-        goto err;
-
-    tblite_get_polarizability(ctx, mol, calc, res);
-    if (tblite_check(ctx))
-        goto err;
-
-    tblite_get_polarizability_gradient(ctx, mol, calc, res);
-    if (tblite_check(ctx))
         goto err;
 
     tblite_get_result_dipole_gradient(error, res, dipgrad);

@@ -56,6 +56,19 @@ typedef enum {
    TBLITE_LOCALIZATION_FOSTERBOYS = 1,
 } tblite_localization_method;
 
+/// Response properties evaluated in the single point calculation, combined as bit flags.
+/// All of them require a closed-shell molecule, the ALPB and GBSA solvation models,
+/// including the surface area and shift contributions, are supported, ddX models are not.
+typedef enum {
+   /// Molecular Hessian and derivative of the dipole moment.
+   TBLITE_RESPONSE_HESSIAN = 1,
+   /// Static dipole polarizability.
+   TBLITE_RESPONSE_POLARIZABILITY = 2,
+   /// Static dipole polarizability and its derivative with respect to the atomic positions,
+   /// requires integer occupation numbers.
+   TBLITE_RESPONSE_POLARIZABILITY_GRADIENT = 4,
+} tblite_response;
+
 /// Single point calculator
 typedef struct _tblite_calculator* tblite_calculator;
 
@@ -211,6 +224,17 @@ tblite_set_calculator_save_integrals(tblite_context ctx,
                                      tblite_calculator calc,
                                      int save_integrals);
 
+/// Select the response properties evaluated in the single point calculation.
+/// Requesting any of them tightens the accuracy to at least 0.001.
+///
+/// @param ctx: Context handle
+/// @param calc: Calculator instance
+/// @param response: Combination of tblite_response flags, zero disables all
+TBLITE_API_ENTRY void TBLITE_API_CALL
+tblite_set_calculator_response(tblite_context ctx,
+                               tblite_calculator calc,
+                               int response);
+
 /// Query calculator for the number of shells
 ///
 /// @param ctx: Context handle
@@ -261,7 +285,8 @@ tblite_get_calculator_orbital_map(tblite_context ctx,
                                   tblite_calculator calc,
                                   int* ao2sh);
 
-/// Perform single point calculation
+/// Perform single point calculation, including the response properties selected
+/// with tblite_set_calculator_response
 ///
 /// @param ctx: Context handle
 /// @param mol: Molecular structure data
@@ -272,51 +297,6 @@ tblite_get_singlepoint(tblite_context ctx,
                        tblite_structure mol,
                        tblite_calculator calc,
                        tblite_result res);
-
-/// Evaluate analytic Hessian and derivative of the dipole moment.
-/// Requires the result of a tightly converged single point calculation
-/// for a closed-shell molecule. The ALPB and GBSA solvation models, including
-/// the surface area and shift contributions, are supported, ddX models are not.
-///
-/// @param ctx: Context handle
-/// @param mol: Molecular structure data
-/// @param calc: Calculator instance
-/// @param res: Result container of a preceding single point calculation
-TBLITE_API_ENTRY void TBLITE_API_CALL
-tblite_get_hessian(tblite_context ctx,
-                   tblite_structure mol,
-                   tblite_calculator calc,
-                   tblite_result res);
-
-/// Evaluate analytic static dipole polarizability.
-/// Requires the result of a tightly converged single point calculation
-/// for a closed-shell molecule. The ALPB and GBSA solvation models are
-/// supported, ddX models are not.
-///
-/// @param ctx: Context handle
-/// @param mol: Molecular structure data
-/// @param calc: Calculator instance
-/// @param res: Result container of a preceding single point calculation
-TBLITE_API_ENTRY void TBLITE_API_CALL
-tblite_get_polarizability(tblite_context ctx,
-                          tblite_structure mol,
-                          tblite_calculator calc,
-                          tblite_result res);
-
-/// Evaluate analytic derivative of the polarizability with respect to the
-/// atomic positions. Requires the result of a tightly converged single point
-/// calculation with integer occupation numbers for a closed-shell molecule.
-/// The ALPB and GBSA solvation models are supported, ddX models are not.
-///
-/// @param ctx: Context handle
-/// @param mol: Molecular structure data
-/// @param calc: Calculator instance
-/// @param res: Result container of a preceding single point calculation
-TBLITE_API_ENTRY void TBLITE_API_CALL
-tblite_get_polarizability_gradient(tblite_context ctx,
-                                   tblite_structure mol,
-                                   tblite_calculator calc,
-                                   tblite_result res);
 
 /// Push Back new container to post processing construct
 ///
